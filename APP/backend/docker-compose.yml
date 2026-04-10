@@ -1,0 +1,13 @@
+services:
+  postgrest:
+    image: postgrest/postgrest:latest
+    container_name: apple_land_postgrest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require
+      PGRST_DB_SCHEMA: ${POSTGREST_DB_SCHEMA}
+      PGRST_DB_ANON_ROLE: ${POSTGREST_DB_ANON_ROLE}
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_MAX_ROWS: 1000
