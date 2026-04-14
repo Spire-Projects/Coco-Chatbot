@@ -1,6 +1,5 @@
 import "dotenv/config";
 import type { Server } from "node:http";
-import { startWhatsAppClients } from "./core/whatsapp/client.js";
 import { logger } from "./core/logger.js";
 import { initializePromptStore } from "./features/prompts/service.js";
 import { startPromptApiServer } from "./features/prompts/server.js";
@@ -13,7 +12,7 @@ const shutdown = (signal: string) => {
   if (promptApiServer) {
     promptApiServer.close((error) => {
       if (error) {
-        logger.error({ error }, "Error cerrando API de prompts");
+        logger.error({ error }, "Error cerrando servidor");
       }
       process.exit(0);
     });
@@ -29,7 +28,6 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 const bootstrap = async () => {
   await initializePromptStore();
   promptApiServer = startPromptApiServer();
-  await startWhatsAppClients();
 };
 
 bootstrap().catch((error) => {

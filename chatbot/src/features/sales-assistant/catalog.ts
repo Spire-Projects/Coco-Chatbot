@@ -1,33 +1,21 @@
 import { env } from "../../config/env.js";
-import type { CatalogItem, CatalogSource } from "./types.js";
+import type { CatalogItem } from "./types.js";
 
 interface IndexedCatalogItem {
   item: CatalogItem;
-  product: string;
-  category: string;
-  colorVariants: string;
-  status: string;
-  priceUsd: string;
-  storage: string;
-  version: string;
-  battery: string;
-  cycles: string;
-  includes: string;
-  fullDescription: string;
+  nombre: string;
+  tipo: string;
+  descripcion: string;
+  ubicacion: string;
+  contacto: string;
+  horario: string;
+  extras: string;
   blob: string;
 }
 
-interface CatalogSheetSpec {
-  source: CatalogSource;
-  sheetName: string;
-  range: string;
-  toItem: (cells: unknown[]) => CatalogItem;
-}
-
 let cache: { updatedAt: number; items: CatalogItem[]; indexed: IndexedCatalogItem[] } | null = null;
-// staleCache persists even after cache expires — used as fallback when a fresh fetch fails
 let staleCache: { items: CatalogItem[]; indexed: IndexedCatalogItem[] } | null = null;
-let inflightCatalogRequest: Promise<CatalogItem[]> | null = null;
+let inflightRequest: Promise<CatalogItem[]> | null = null;
 const SHEETS_REQUEST_TIMEOUT_MS = 8000;
 
 const parseGvizResponse = (payload: string) => {
@@ -67,124 +55,67 @@ const tokenize = (value: string): string[] => {
   return Array.from(new Set(normalizeText(value).split(" ").filter((term) => term.length >= 2)));
 };
 
-const toPrimaryCatalogItem = (cells: unknown[]): CatalogItem => {
+// Mapeo de columnas del Excel al CatalogItem
+// A(0)=index  B(1)=nombre  C(2)=tipo  D(3)=descripcion
+// E(4)=ubicacion  F(5)=contacto  G(6)=horario  H(7)=extras
+// Actualizar este mapeo cuando llegue la plantilla real del cliente
+const toEmpresaItem = (cells: unknown[]): CatalogItem => {
   return {
-    source: "nuevo",
     index: toCellText(cells[0]),
-    product: toCellText(cells[1]),
-    category: toCellText(cells[2]),
-    priceUsd: toCellText(cells[3]),
-    priceBs: toCellText(cells[4]),
-    warranty: toCellText(cells[5]),
-    status: toCellText(cells[6]),
-    colorVariants: toCellText(cells[7])
+    nombre: toCellText(cells[1]),
+    tipo: toCellText(cells[2]),
+    descripcion: toCellText(cells[3]),
+    ubicacion: toCellText(cells[4]),
+    contacto: toCellText(cells[5]),
+    horario: toCellText(cells[6]),
+    extras: toCellText(cells[7])
   };
 };
-
-const toSeminuevoCatalogItem = (cells: unknown[]): CatalogItem => {
-  const storage = toCellText(cells[2]);
-  const version = toCellText(cells[3]);
-  const color = toCellText(cells[4]);
-  const battery = toCellText(cells[5]);
-  const cycles = toCellText(cells[6]);
-
-  const status = [
-    battery.length > 0 ? `Bateria ${battery}` : "",
-    cycles.length > 0 ? `${cycles} ciclos` : ""
-  ]
-    .filter((part) => part.length > 0)
-    .join(" | ");
-
-  return {
-    source: "seminuevo",
-    index: toCellText(cells[0]),
-    product: toCellText(cells[1]),
-    category: storage.length > 0 ? `Seminuevo ${storage}` : "Seminuevo",
-    priceUsd: toCellText(cells[7]),
-    priceBs: toCellText(cells[8]),
-    warranty: "",
-    status: status || "Seminuevo",
-    colorVariants: color,
-    storage,
-    version,
-    battery,
-    cycles,
-    includes: toCellText(cells[9]),
-    fullDescription: toCellText(cells[10])
-  };
-};
-
-const CATALOG_SHEETS: CatalogSheetSpec[] = [
-  {
-    source: "nuevo",
-    sheetName: env.SHEETS_PRIMARY_SHEET_NAME,
-    range: env.SHEETS_PRIMARY_RANGE,
-    toItem: toPrimaryCatalogItem
-  },
-  {
-    source: "seminuevo",
-    sheetName: env.SHEETS_SEMINUEVOS_SHEET_NAME,
-    range: env.SHEETS_SEMINUEVOS_RANGE,
-    toItem: toSeminuevoCatalogItem
-  }
-];
 
 const isCacheValid = (): boolean => {
-  if (!cache) {
-    return false;
-  }
-
-  const ageMs = Date.now() - cache.updatedAt;
-  return ageMs <= env.SHEETS_CACHE_SECONDS * 1000;
+  if (!cache) return false;
+  return Date.now() - cache.updatedAt <= env.SHEETS_CACHE_SECONDS * 1000;
 };
 
 const toIndexedCatalogItems = (items: CatalogItem[]): IndexedCatalogItem[] => {
   return items.map((item) => {
-    const product = normalizeText(item.product);
-    const category = normalizeText(item.category);
-    const colorVariants = normalizeText(item.colorVariants);
-    const status = normalizeText(item.status);
-    const priceUsd = normalizeText(item.priceUsd);
-    const storage = normalizeText(item.storage ?? "");
-    const version = normalizeText(item.version ?? "");
-    const battery = normalizeText(item.battery ?? "");
-    const cycles = normalizeText(item.cycles ?? "");
-    const includes = normalizeText(item.includes ?? "");
-    const fullDescription = normalizeText(item.fullDescription ?? "");
+    const nombre = normalizeText(item.nombre);
+    const tipo = normalizeText(item.tipo);
+    const descripcion = normalizeText(item.descripcion);
+    const ubicacion = normalizeText(item.ubicacion);
+    const contacto = normalizeText(item.contacto);
+    const horario = normalizeText(item.horario);
+    const extras = normalizeText(item.extras);
 
     return {
       item,
-      product,
-      category,
-      colorVariants,
-      status,
-      priceUsd,
-      storage,
-      version,
-      battery,
-      cycles,
-      includes,
-      fullDescription,
-      blob: `${product} ${category} ${colorVariants} ${status} ${priceUsd} ${storage} ${version} ${battery} ${cycles} ${includes} ${fullDescription}`.trim()
+      nombre,
+      tipo,
+      descripcion,
+      ubicacion,
+      contacto,
+      horario,
+      extras,
+      blob: `${nombre} ${tipo} ${descripcion} ${ubicacion} ${contacto} ${horario} ${extras}`.trim()
     };
   });
 };
 
-const fetchCatalogItemsFromSheet = async (sheetSpec: CatalogSheetSpec): Promise<CatalogItem[]> => {
+const fetchItemsFromSheet = async (): Promise<CatalogItem[]> => {
   const url = new URL(
     `https://docs.google.com/spreadsheets/d/${env.SHEETS_SPREADSHEET_ID}/gviz/tq`
   );
   url.searchParams.set("tqx", "out:json");
-  url.searchParams.set("sheet", sheetSpec.sheetName);
-  url.searchParams.set("range", sheetSpec.range);
+  url.searchParams.set("sheet", env.SHEETS_SHEET_NAME);
+  url.searchParams.set("range", env.SHEETS_RANGE);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SHEETS_REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url.toString(), { signal: controller.signal });
     if (!response.ok) {
-      throw new Error(`Error leyendo Sheet: ${response.status}`);
+      throw new Error(`Error leyendo Google Sheets: ${response.status}`);
     }
 
     const payload = await response.text();
@@ -193,8 +124,8 @@ const fetchCatalogItemsFromSheet = async (sheetSpec: CatalogSheetSpec): Promise<
 
     return rows
       .map((row) => row.c.map((cell) => cell?.v ?? ""))
-      .map(sheetSpec.toItem)
-      .filter((item) => item.product.length > 0);
+      .map(toEmpresaItem)
+      .filter((item) => item.nombre.length > 0);
   } finally {
     clearTimeout(timeout);
   }
@@ -205,26 +136,13 @@ export const getCatalogItems = async (): Promise<CatalogItem[]> => {
     return cache.items;
   }
 
-  if (inflightCatalogRequest) {
-    return inflightCatalogRequest;
+  if (inflightRequest) {
+    return inflightRequest;
   }
 
-  inflightCatalogRequest = (async () => {
+  inflightRequest = (async () => {
     try {
-      const settled = await Promise.allSettled(
-        CATALOG_SHEETS.map((sheetSpec) => fetchCatalogItemsFromSheet(sheetSpec))
-      );
-
-      const items = settled
-        .filter((result): result is PromiseFulfilledResult<CatalogItem[]> => result.status === "fulfilled")
-        .flatMap((result) => result.value);
-
-      if (items.length === 0) {
-        const firstError = settled.find(
-          (result): result is PromiseRejectedResult => result.status === "rejected"
-        );
-        throw firstError?.reason ?? new Error("No se pudieron leer hojas de catalogo");
-      }
+      const items = await fetchItemsFromSheet();
 
       const indexed = toIndexedCatalogItems(items);
       cache = { updatedAt: Date.now(), items, indexed };
@@ -232,28 +150,22 @@ export const getCatalogItems = async (): Promise<CatalogItem[]> => {
 
       return items;
     } catch (error) {
-      // Prefer fresh cache, then stale cache, then throw
-      if (cache && cache.items.length > 0) {
-        return cache.items;
-      }
-
       if (staleCache && staleCache.items.length > 0) {
         return staleCache.items;
       }
-
       throw error;
     } finally {
-      inflightCatalogRequest = null;
+      inflightRequest = null;
     }
   })();
 
-  return inflightCatalogRequest;
+  return inflightRequest;
 };
 
 export const findRelevantCatalogItems = (
   items: CatalogItem[],
   query: string,
-  maxItems = 8
+  maxItems = 10
 ): CatalogItem[] => {
   const terms = tokenize(query);
 
@@ -261,70 +173,36 @@ export const findRelevantCatalogItems = (
     return items.slice(0, maxItems);
   }
 
-  const indexed =
-    cache && cache.items === items ? cache.indexed : toIndexedCatalogItems(items);
-
+  const indexed = cache && cache.items === items ? cache.indexed : toIndexedCatalogItems(items);
   const normalizedQuery = normalizeText(query);
 
   const scored = indexed
     .map((entry) => {
-      const {
-        product,
-        category,
-        colorVariants,
-        status,
-        priceUsd,
-        storage,
-        version,
-        battery,
-        cycles,
-        includes,
-        fullDescription,
-        blob
-      } = entry;
-
       let score = 0;
+
       for (const term of terms) {
         let termScore = 0;
 
-        if (product.includes(term)) {
+        if (entry.nombre.includes(term)) {
           termScore = Math.max(termScore, 4);
         }
-
-        if (
-          category.includes(term) ||
-          colorVariants.includes(term) ||
-          storage.includes(term) ||
-          version.includes(term)
-        ) {
+        if (entry.tipo.includes(term)) {
+          termScore = Math.max(termScore, 5); // tipo es el campo mas relevante
+        }
+        if (entry.descripcion.includes(term) || entry.ubicacion.includes(term)) {
           termScore = Math.max(termScore, 2);
         }
-
-        if (battery.includes(term)) {
-          termScore = Math.max(termScore, 2);
-        }
-
-        if (priceUsd.includes(term)) {
-          termScore = Math.max(termScore, 1);
-        }
-
-        if (
-          status.includes(term) ||
-          cycles.includes(term) ||
-          includes.includes(term) ||
-          fullDescription.includes(term) ||
-          blob.includes(term)
-        ) {
+        if (entry.blob.includes(term)) {
           termScore = Math.max(termScore, 1);
         }
 
         score += termScore;
       }
 
-      if (normalizedQuery.length >= 3 && product.includes(normalizedQuery)) {
+      if (normalizedQuery.length >= 3 && entry.tipo.includes(normalizedQuery)) {
+        score += 5;
+      } else if (normalizedQuery.length >= 3 && entry.nombre.includes(normalizedQuery)) {
         score += 4;
-      } else if (normalizedQuery.length >= 3 && fullDescription.includes(normalizedQuery)) {
-        score += 2;
       }
 
       return { item: entry.item, score };

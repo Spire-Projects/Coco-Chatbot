@@ -7,23 +7,25 @@ let migrationAttempted = false;
 
 const nowIso = () => new Date().toISOString();
 
+const isTursoConfigured = (): boolean => {
+  const url = env.TURSO_DATABASE_URL;
+  return Boolean(url && url.startsWith("libsql://"));
+};
+
 const ensureClient = (): Client => {
   if (client) {
     return client;
   }
 
-  if (!env.TURSO_DATABASE_URL) {
-    throw new Error("TURSO_DATABASE_URL no configurado");
+  if (isTursoConfigured()) {
+    client = createClient({
+      url: env.TURSO_DATABASE_URL,
+      authToken: env.TURSO_AUTH_TOKEN
+    });
+  } else {
+    // Fallback: SQLite local (no requiere cuenta Turso)
+    client = createClient({ url: "file:./prompts.db" });
   }
-
-  if (!env.TURSO_AUTH_TOKEN) {
-    throw new Error("TURSO_AUTH_TOKEN no configurado");
-  }
-
-  client = createClient({
-    url: env.TURSO_DATABASE_URL,
-    authToken: env.TURSO_AUTH_TOKEN
-  });
 
   return client;
 };

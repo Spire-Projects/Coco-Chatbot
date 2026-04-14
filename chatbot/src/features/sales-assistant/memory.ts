@@ -64,10 +64,6 @@ export const addConversationTurn = (
   memory.lastIntent = lastIntent;
   memory.lastActivityAt = now();
 
-  if (budgetUsd) {
-    memory.budgetUsd = budgetUsd;
-  }
-
   for (const product of products) {
     if (!memory.productsMentioned.includes(product)) {
       memory.productsMentioned.push(product);

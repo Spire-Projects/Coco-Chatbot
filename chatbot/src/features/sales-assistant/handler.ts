@@ -1,114 +1,66 @@
-import type { WASocket } from "@whiskeysockets/baileys";
-import type { SessionStoreProfile } from "../../config/sessions.js";
 import { logger } from "../../core/logger.js";
+import { sendTextMessage, markMessageAsRead } from "../../core/whatsapp/sender.js";
 import { getCatalogItems, findRelevantCatalogItems } from "./catalog.js";
-import { generateSalesReply } from "./gemini.js";
+import { generateReply } from "./gemini.js";
 import { detectIntent } from "./intent.js";
-import { respondWithHumanSimulation } from "./human-simulation.js";
 import {
   addConversationTurnScoped,
-  clearConversationMemoryScoped,
   getConversationMemoryScoped
 } from "./memory.js";
 
-const extractTextFromMessage = (message: any): string => {
-  return (
-    message?.conversation ||
-    message?.extendedTextMessage?.text ||
-    message?.imageMessage?.caption ||
-    message?.videoMessage?.caption ||
-    ""
-  ).trim();
+const MAIN_SESSION = "main";
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const calculateDelay = (textLength: number): number => {
+  const base = Math.min(Math.max(textLength * 25, 1200), 5000);
+  const jitter = Math.random() * 600 - 300;
+  return Math.round(base + jitter);
 };
 
-const extractBudgetUsd = (text: string): string | undefined => {
-  const match = text.match(/\$\s?(\d{2,5})|(\d{2,5})\s?usd/i);
-  if (!match) {
-    return undefined;
-  }
-
-  return (match[1] || match[2] || "").trim();
-};
-
-export const handleSalesMessage = async (
-  sock: WASocket,
-  payload: { sessionProfile: SessionStoreProfile; jid: string; text: string }
-): Promise<void> => {
-  const { sessionProfile } = payload;
-  const jid = payload.jid;
-  const incomingText = payload.text.trim();
+export const handleIncomingMessage = async (payload: {
+  from: string;
+  text: string;
+  messageId: string;
+}): Promise<void> => {
+  const { from, text, messageId } = payload;
+  const incomingText = text.trim();
 
   if (!incomingText) {
     return;
   }
 
-  const intent = detectIntent(incomingText);
-  const memory = getConversationMemoryScoped(sessionProfile.sessionId, jid);
+  // Marcar como leido (muestra ticks azules)
+  await markMessageAsRead(messageId);
 
-  logger.info({ jid, intent, sessionId: sessionProfile.sessionId }, "Procesando mensaje comercial");
+  const intent = detectIntent(incomingText);
+  const memory = getConversationMemoryScoped(MAIN_SESSION, from);
+
+  logger.info({ from, intent }, "Procesando mensaje");
 
   try {
     const catalog = await getCatalogItems();
     const relevantItems = findRelevantCatalogItems(catalog, incomingText);
 
-    const aiReply = await generateSalesReply({
+    const reply = await generateReply({
       userMessage: incomingText,
       intent,
       memory,
-      sessionName: sessionProfile.sessionId,
+      sessionName: MAIN_SESSION,
       relevantItems,
       totalCatalogItems: catalog.length
     });
 
-    const finalReply = aiReply;
+    // Delay natural antes de responder
+    await sleep(calculateDelay(reply.length));
 
-    await respondWithHumanSimulation(sock, jid, finalReply);
+    await sendTextMessage(from, reply);
 
-    const budgetUsd = extractBudgetUsd(incomingText);
-    const matchedProducts = relevantItems.map((item) => item.product).slice(0, 3);
-
-    addConversationTurnScoped(
-      sessionProfile.sessionId,
-      jid,
-      { role: "user", text: incomingText, at: Date.now() },
-      intent,
-      matchedProducts,
-      budgetUsd
-    );
-    addConversationTurnScoped(
-      sessionProfile.sessionId,
-      jid,
-      { role: "assistant", text: finalReply, at: Date.now() },
-      intent,
-      matchedProducts,
-      budgetUsd
-    );
-
-    if (intent === "close") {
-      clearConversationMemoryScoped(sessionProfile.sessionId, jid);
-      logger.info({ jid, sessionId: sessionProfile.sessionId }, "Conversacion finalizada y memoria limpiada");
-    }
+    addConversationTurnScoped(MAIN_SESSION, from, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+    addConversationTurnScoped(MAIN_SESSION, from, { role: "assistant", text: reply, at: Date.now() }, intent, []);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const isNetworkError = errorMessage.includes("fetch") || errorMessage.includes("timeout") || errorMessage.includes("abort") || errorMessage.includes("ECONNRESET") || errorMessage.includes("ETIMEDOUT");
-    logger.error(
-      {
-        error,
-        errorMessage,
-        isNetworkError,
-        jid,
-        sessionId: sessionProfile.sessionId
-      },
-      isNetworkError
-        ? "Error de red al consultar catalogo — enviando mensaje de error al cliente"
-        : "Fallo inesperado en flujo comercial — enviando mensaje de error al cliente"
-    );
-    await respondWithHumanSimulation(
-      sock,
-      jid,
-      "Hubo un problema consultando el catalogo en este momento. Si quieres, te paso con un agente de inmediato."
-    );
+    logger.error({ error, from }, "Error al procesar mensaje");
+    await sendTextMessage(from, "Disculpa, tuve un problema al procesar tu consulta. Por favor intenta nuevamente.");
   }
 };
 
-export const getIncomingMessageText = extractTextFromMessage;

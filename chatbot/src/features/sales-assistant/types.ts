@@ -1,23 +1,14 @@
-export type SalesIntent = "query" | "comparison" | "close";
-
-export type CatalogSource = "nuevo" | "seminuevo";
+export type SalesIntent = "query" | "comparison";
 
 export interface CatalogItem {
-  source: CatalogSource;
   index: string;
-  product: string;
-  category: string;
-  priceUsd: string;
-  priceBs: string;
-  warranty: string;
-  status: string;
-  colorVariants: string;
-  storage?: string;
-  version?: string;
-  battery?: string;
-  cycles?: string;
-  includes?: string;
-  fullDescription?: string;
+  nombre: string;
+  tipo: string;
+  descripcion: string;
+  ubicacion: string;
+  contacto: string;
+  horario: string;
+  extras: string;
 }
 
 export interface ConversationTurn {
@@ -32,6 +23,5 @@ export interface ConversationMemory {
   lastActivityAt: number;
   turns: ConversationTurn[];
   productsMentioned: string[];
-  budgetUsd?: string;
   lastIntent: SalesIntent;
 }
