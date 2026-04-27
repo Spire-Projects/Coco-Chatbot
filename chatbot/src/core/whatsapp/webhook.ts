@@ -2,8 +2,9 @@ import { Router } from "express";
 import { env } from "../../config/env.js";
 import { logger } from "../logger.js";
 import { handleIncomingMessage } from "../../features/sales-assistant/handler.js";
+import type { IWhatsAppTransport } from "./transport.js";
 
-export const createWhatsAppWebhookRouter = (): Router => {
+export const createWhatsAppWebhookRouter = (transport: IWhatsAppTransport): Router => {
   const router = Router();
 
   // Verificacion del webhook (Meta llama GET al configurarlo)
@@ -60,7 +61,7 @@ export const createWhatsAppWebhookRouter = (): Router => {
 
           logger.info({ from, messageId }, "Mensaje entrante de WhatsApp recibido");
 
-          handleIncomingMessage({ from, text, messageId }).catch((error) => {
+          handleIncomingMessage({ from, text, messageId }, transport).catch((error) => {
             logger.error({ error, from }, "Error al procesar mensaje entrante");
           });
         }

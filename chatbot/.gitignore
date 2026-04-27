@@ -3,3 +3,5 @@ dist
 auth
 logs
 .env
+# Credenciales de sesión Baileys (contienen claves privadas, no commitear)
+baileys_auth/

@@ -12,6 +12,9 @@ const parseLogLevel = (value: string | undefined, fallback: string): string => {
 export const env = {
   LOG_LEVEL: parseLogLevel(process.env.LOG_LEVEL, "info"),
 
+  // Proveedor de WhatsApp: "baileys" (QR local) | "meta" (Cloud API + webhook)
+  WHATSAPP_PROVIDER: (process.env.WHATSAPP_PROVIDER ?? "baileys") as "baileys" | "meta",
+
   // Meta WhatsApp Cloud API
   META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN ?? "",
   META_PHONE_NUMBER_ID: process.env.META_PHONE_NUMBER_ID ?? "",
@@ -36,8 +39,12 @@ export const env = {
   // Google Sheets (directorio de empresas)
   SHEETS_SPREADSHEET_ID: process.env.SHEETS_SPREADSHEET_ID ?? "",
   SHEETS_SHEET_NAME: process.env.SHEETS_SHEET_NAME ?? "Hoja1",
-  SHEETS_RANGE: process.env.SHEETS_RANGE ?? "A1:H",
+  SHEETS_RANGE: process.env.SHEETS_RANGE ?? "A:M",
   SHEETS_CACHE_SECONDS: parseNumber(process.env.SHEETS_CACHE_SECONDS, 120),
+  SHEETS_MAX_ROWS: parseNumber(process.env.SHEETS_MAX_ROWS, 5000),
+
+  // Catalogo local CSV (alternativa a Google Sheets)
+  CATALOG_FILE_PATH: process.env.CATALOG_FILE_PATH ?? "",
 
   // Memoria de conversacion
   MEMORY_TTL_MINUTES: parseNumber(process.env.MEMORY_TTL_MINUTES, 30),

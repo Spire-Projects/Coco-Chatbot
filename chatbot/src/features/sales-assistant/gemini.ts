@@ -8,24 +8,25 @@ const modelNotConfiguredMessage =
   "Hola! Puedo ayudarte con informacion de empresas, pero la IA aun no esta configurada. Contacta al administrador.";
 
 const formatCatalogLine = (item: CatalogItem): string => {
-  return [
-    `- ${item.nombre}`,
-    item.tipo ? `Tipo: ${item.tipo}` : "",
-    item.descripcion ? `Descripcion: ${item.descripcion}` : "",
-    item.ubicacion ? `Ubicacion: ${item.ubicacion}` : "",
-    item.contacto ? `Contacto: ${item.contacto}` : "",
-    item.horario ? `Horario: ${item.horario}` : "",
-    item.extras ? `Info adicional: ${item.extras}` : ""
-  ]
-    .filter((part) => part.length > 0)
-    .join(" | ");
+  const ubicacion  = [item.departamento, item.municipio].filter(Boolean).join(", ");
+  const actExtras  = item.actividades.slice(1).filter(Boolean);
+  const lines: string[] = [];
+
+  lines.push(`🏢 *${item.nombre}*${item.tipoEmpresa ? `  _(${item.tipoEmpresa})_` : ""}`);
+  if (ubicacion)               lines.push(`📍 ${ubicacion}`);
+  if (item.actividadPrincipal) lines.push(`🔧 ${item.actividadPrincipal}`);
+  if (actExtras.length > 0)    lines.push(`• ${actExtras.join(" · ")}`);
+  if (item.direccion)          lines.push(`🏠 ${item.direccion}`);
+  if (item.telefono)           lines.push(`📞 ${item.telefono}`);
+  if (item.email)              lines.push(`📧 ${item.email}`);
+  if (item.gerente)            lines.push(`👤 ${item.gerente}`);
+
+  return lines.join("\n");
 };
 
 const formatItems = (items: CatalogItem[]): string => {
-  if (items.length === 0) {
-    return "- Sin coincidencias en el directorio";
-  }
-  return items.map(formatCatalogLine).join("\n");
+  if (items.length === 0) return "- Sin coincidencias en el directorio";
+  return items.map((item, i) => `--- Empresa ${i + 1} ---\n${formatCatalogLine(item)}`).join("\n\n");
 };
 
 const formatMemory = (memory: ConversationMemory): string => {
@@ -34,11 +35,19 @@ const formatMemory = (memory: ConversationMemory): string => {
     .map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
     .join("\n");
 
+  const contextLines = [
+    memory.lastRubro    && `Rubro buscado: ${memory.lastRubro}`,
+    memory.lastUbicacion && `Ubicacion mencionada: ${memory.lastUbicacion}`,
+  ].filter(Boolean);
+
   return [
     `Intencion previa: ${memory.lastIntent}`,
+    contextLines.length > 0 ? `Contexto acumulado:\n${contextLines.join("\n")}` : "",
     "Ultimos mensajes:",
     turns || "Sin historial"
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 };
 
 const getDateTimeContext = (): string => {
@@ -71,7 +80,10 @@ export const generateReply = async (input: {
   }
 
   const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
+  const model = genAI.getGenerativeModel({
+    model: env.GEMINI_MODEL,
+    generationConfig: { thinkingConfig: { thinkingBudget: 0 } } as never
+  });
 
   const resolvedPrompt = await resolvePromptForSession(input.sessionName);
 
@@ -82,11 +94,6 @@ export const generateReply = async (input: {
     "Si no encuentras coincidencias exactas, sugiere opciones similares del directorio.",
     "Nunca inventes informacion que no este en el directorio."
   ].join(" ");
-
-  logger.debug(
-    { sessionId: input.sessionName },
-    "Generando respuesta con Gemini"
-  );
 
   const prompt = [
     `INTENCION: ${input.intent}`,
@@ -100,10 +107,30 @@ export const generateReply = async (input: {
     "RESPUESTA:"
   ].join("\n\n");
 
-  const result = await model.generateContent([
-    { text: `${systemPrompt}\n\n${prompt}` }
-  ]);
+  // Retry con backoff exponencial para manejar rate limits 429
+  const MAX_RETRIES = 3;
+  let lastError: unknown;
 
-  const text = result.response.text().trim();
-  return text.length > 0 ? text : "No pude generar una respuesta en este momento. Intenta de nuevo.";
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await model.generateContent([
+        { text: `${systemPrompt}\n\n${prompt}` }
+      ]);
+      const text = result.response.text().trim();
+      return text.length > 0 ? text : "No pude generar una respuesta en este momento. Intenta de nuevo. 😊";
+    } catch (err) {
+      lastError = err;
+      const status = (err as { status?: number })?.status;
+      if (status === 429 && attempt < MAX_RETRIES) {
+        // Esperar antes de reintentar: 20s, 40s
+        const waitMs = attempt * 20_000;
+        logger.warn({ attempt, waitMs }, "Gemini 429 — reintentando");
+        await new Promise((res) => setTimeout(res, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError;
 };

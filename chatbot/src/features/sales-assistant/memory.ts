@@ -38,7 +38,9 @@ const getConversationMemoryByKey = (key: string): ConversationMemory => {
     lastActivityAt: now(),
     turns: [],
     productsMentioned: [],
-    lastIntent: "query"
+    lastIntent: "query",
+    lastRubro: "",
+    lastUbicacion: "",
   };
 
   store.set(key, created);

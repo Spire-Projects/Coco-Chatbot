@@ -4,8 +4,13 @@ import { env } from "../../config/env.js";
 import { logger } from "../../core/logger.js";
 import { createPromptRouter } from "./routes.js";
 import { createWhatsAppWebhookRouter } from "../../core/whatsapp/webhook.js";
+import { searchCatalog, getTotalCount } from "../sales-assistant/catalog.js";
+import { generateReply } from "../sales-assistant/gemini.js";
+import { detectIntent } from "../sales-assistant/intent.js";
+import { addConversationTurnScoped, getConversationMemoryScoped } from "../sales-assistant/memory.js";
+import type { IWhatsAppTransport } from "../../core/whatsapp/transport.js";
 
-export const startPromptApiServer = (): Server => {
+export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
   const app = express();
 
   app.use((req, res, next) => {
@@ -28,10 +33,50 @@ export const startPromptApiServer = (): Server => {
   });
 
   // Webhook de Meta WhatsApp
-  app.use("/webhook", createWhatsAppWebhookRouter());
+  app.use("/webhook", createWhatsAppWebhookRouter(transport));
 
   // API de prompts
   app.use("/api/prompts", createPromptRouter());
+
+  // Endpoint de prueba HTTP — simula mensajes sin necesitar WhatsApp conectado
+  app.post("/test", async (req, res) => {
+    try {
+      const text: string = typeof req.body?.text === "string" ? req.body.text.trim() : "hola";
+      const from: string = typeof req.body?.from === "string" ? req.body.from : "test_user";
+
+      if (!text) {
+        res.status(400).json({ error: "Campo 'text' requerido" });
+        return;
+      }
+
+      const intent = detectIntent(text);
+      const memory = getConversationMemoryScoped("main", from);
+      // Extraer términos del mensaje de prueba para búsqueda contextual
+      const words = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/\s+/).filter((w) => w.length >= 3);
+      const [relevantItems, totalCatalogItems] = await Promise.all([
+        searchCatalog(words, [], 15),
+        getTotalCount(),
+      ]);
+
+      const reply = await generateReply({
+        userMessage: text,
+        intent,
+        memory,
+        sessionName: "main",
+        relevantItems,
+        totalCatalogItems
+      });
+
+      addConversationTurnScoped("main", from, { role: "user", text, at: Date.now() }, intent, []);
+      addConversationTurnScoped("main", from, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+
+      res.json({ reply, catalogItems: totalCatalogItems, relevantItems: relevantItems.length, intent });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ error: message }, "Error en /test");
+      res.status(500).json({ error: message });
+    }
+  });
 
   // Panel de administracion HTML (editor de prompt)
   app.get("/admin", (_req, res) => {
@@ -100,6 +145,20 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="card" style="margin-top: 1.5rem;">
+    <h2>Probar el Chatbot</h2>
+    <p class="hint">Simula conversaciones sin WhatsApp ni credenciales Meta. El historial se mantiene por sesion para probar contexto.</p>
+    <div id="chatHistory" style="border:1px solid #ddd;border-radius:6px;padding:0.75rem;height:320px;overflow-y:auto;background:#f8f9fa;display:flex;flex-direction:column;gap:0.6rem;margin-bottom:0.75rem;"></div>
+    <div style="display:flex;gap:0.5rem;">
+      <input id="testInput" type="text" placeholder="Escribe un mensaje de prueba..." style="flex:1;padding:0.55rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.9rem;font-family:inherit;">
+      <button id="testBtn" onclick="sendTest()">Enviar</button>
+    </div>
+    <div style="display:flex;gap:1rem;align-items:center;margin-top:0.5rem;">
+      <span class="msg" id="testStats" style="flex:1;"></span>
+      <button onclick="clearChat()" style="background:#6c757d;font-size:0.8rem;padding:0.35rem 0.75rem;">Limpiar chat</button>
+    </div>
+  </div>
+
   <script>
     const base = '/api/prompts';
 
@@ -143,6 +202,70 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
     }
 
     load();
+
+    // ── Chat de prueba ────────────────────────────────────────────
+    let sessionId = 'demo_' + Math.random().toString(36).slice(2, 8);
+
+    function appendMessage(role, text) {
+      const chat = document.getElementById('chatHistory');
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;align-items:' + (role === 'user' ? 'flex-end' : 'flex-start') + ';';
+      const bubble = document.createElement('div');
+      bubble.style.cssText = role === 'user'
+        ? 'background:#0d6efd;color:white;padding:0.5rem 0.75rem;border-radius:12px 12px 2px 12px;max-width:78%;font-size:0.9rem;white-space:pre-wrap;word-break:break-word;'
+        : 'background:white;border:1px solid #ddd;padding:0.5rem 0.75rem;border-radius:12px 12px 12px 2px;max-width:78%;font-size:0.9rem;white-space:pre-wrap;word-break:break-word;';
+      bubble.textContent = text;
+      wrap.appendChild(bubble);
+      chat.appendChild(wrap);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function sendTest() {
+      const input = document.getElementById('testInput');
+      const text = input.value.trim();
+      if (!text) return;
+      const btn = document.getElementById('testBtn');
+      btn.disabled = true;
+      input.value = '';
+      appendMessage('user', text);
+      const chat = document.getElementById('chatHistory');
+      const typing = document.createElement('div');
+      typing.id = 'typing-indicator';
+      typing.style.cssText = 'color:#888;font-size:0.85rem;font-style:italic;padding:0.25rem 0.5rem;';
+      typing.textContent = 'Escribiendo...';
+      chat.appendChild(typing);
+      chat.scrollTop = chat.scrollHeight;
+      try {
+        const r = await fetch('/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, from: sessionId })
+        });
+        const d = await r.json();
+        document.getElementById('typing-indicator')?.remove();
+        if (!r.ok) throw new Error(d.error ?? 'Error');
+        appendMessage('bot', d.reply);
+        const stats = document.getElementById('testStats');
+        stats.textContent = 'Catalogo: ' + d.catalogItems + ' empresas | Relevantes: ' + d.relevantItems;
+        stats.className = 'msg ok';
+      } catch (e) {
+        document.getElementById('typing-indicator')?.remove();
+        showMsg('testStats', 'Error: ' + e.message, false);
+      } finally {
+        btn.disabled = false;
+        input.focus();
+      }
+    }
+
+    function clearChat() {
+      document.getElementById('chatHistory').innerHTML = '';
+      document.getElementById('testStats').textContent = '';
+      sessionId = 'demo_' + Math.random().toString(36).slice(2, 8);
+    }
+
+    document.getElementById('testInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') sendTest();
+    });
   </script>
 </body>
 </html>`;

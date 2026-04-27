@@ -1,22 +1,24 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { env } from "../../config/env.js";
 import type { CatalogItem } from "./types.js";
 
-interface IndexedCatalogItem {
-  item: CatalogItem;
-  nombre: string;
-  tipo: string;
-  descripcion: string;
-  ubicacion: string;
-  contacto: string;
-  horario: string;
-  extras: string;
-  blob: string;
+// ── Per-query result cache ────────────────────────────────────────────────────
+// En lugar de cargar las 118k filas completas, cacheamos el resultado de cada
+// consulta filtrada por 3 min. Memoria baja y compatible con datos dinámicos.
+interface QueryCacheEntry {
+  results: CatalogItem[];
+  cachedAt: number;
 }
 
-let cache: { updatedAt: number; items: CatalogItem[]; indexed: IndexedCatalogItem[] } | null = null;
-let staleCache: { items: CatalogItem[]; indexed: IndexedCatalogItem[] } | null = null;
-let inflightRequest: Promise<CatalogItem[]> | null = null;
-const SHEETS_REQUEST_TIMEOUT_MS = 8000;
+const queryCache = new Map<string, QueryCacheEntry>();
+const QUERY_CACHE_TTL_MS = 3 * 60 * 1000;   // 3 min por resultado de búsqueda
+const QUERY_CACHE_MAX_ENTRIES = 100;
+
+let totalCountCache: { count: number; cachedAt: number } | null = null;
+const TOTAL_COUNT_TTL_MS = 10 * 60 * 1000;  // 10 min para el total del directorio
+
+const SHEETS_REQUEST_TIMEOUT_MS = 25000;
 
 const parseGvizResponse = (payload: string) => {
   const startToken = "google.visualization.Query.setResponse(";
@@ -55,162 +57,247 @@ const tokenize = (value: string): string[] => {
   return Array.from(new Set(normalizeText(value).split(" ").filter((term) => term.length >= 2)));
 };
 
-// Mapeo de columnas del Excel al CatalogItem
-// A(0)=index  B(1)=nombre  C(2)=tipo  D(3)=descripcion
-// E(4)=ubicacion  F(5)=contacto  G(6)=horario  H(7)=extras
-// Actualizar este mapeo cuando llegue la plantilla real del cliente
+// Mapeo de columnas del Google Sheets al CatalogItem
+// A(0)=DEPARTAMENTO  B(1)=MUNICIPIO       C(2)=NOMBRE EMPRESA
+// D(3)=ACTIVIDAD PRINCIPAL               E(4)=TIPO (unipersonal, SRL...)
+// F(5)=NOMBRE GERENTE  G(6)=DIRECCION     H(7)=EMAIL   I(8)=TELEFONO
+// J(9)=ACT.SECUNDARIA  K(10)=ACT.3  L(11)=ACT.4  M(12)=ACT.5
 const toEmpresaItem = (cells: unknown[]): CatalogItem => {
+  const actividades = [
+    toCellText(cells[3]),   // D - actividad principal
+    toCellText(cells[9]),   // J - actividad secundaria
+    toCellText(cells[10]),  // K - actividad 3
+    toCellText(cells[11]),  // L - actividad 4
+    toCellText(cells[12]),  // M - actividad 5
+  ].filter(Boolean);
+
   return {
-    index: toCellText(cells[0]),
-    nombre: toCellText(cells[1]),
-    tipo: toCellText(cells[2]),
-    descripcion: toCellText(cells[3]),
-    ubicacion: toCellText(cells[4]),
-    contacto: toCellText(cells[5]),
-    horario: toCellText(cells[6]),
-    extras: toCellText(cells[7])
+    departamento:       toCellText(cells[0]),
+    municipio:          toCellText(cells[1]),
+    nombre:             toCellText(cells[2]),
+    actividadPrincipal: toCellText(cells[3]),
+    tipoEmpresa:        toCellText(cells[4]),
+    gerente:            toCellText(cells[5]),
+    direccion:          toCellText(cells[6]),
+    email:              toCellText(cells[7]),
+    telefono:           toCellText(cells[8]),
+    actividades,
   };
 };
 
-const isCacheValid = (): boolean => {
-  if (!cache) return false;
-  return Date.now() - cache.updatedAt <= env.SHEETS_CACHE_SECONDS * 1000;
+// ── gviz Query Builder ────────────────────────────────────────────────────────
+// Google Sheets gviz asigna el ID de columna igual a la letra de la columna:
+// A=Dpto  B=Mpio  C=Nombre  D=ActPpal  E=Tipo
+// F=Gerente  G=Dir  H=Email  I=Tel  J-M=ActSecundarias
+// NOTA: lower() en gviz NO normaliza tildes, pero 'contains' sí es case-insensitive.
+
+/** Elimina comillas simples y chars peligrosos para evitar inyección TQ. */
+const sanitizeTerm = (term: string): string =>
+  term.replace(/'/g, "").replace(/[^a-z0-9 ]/g, "").trim().slice(0, 50);
+
+/**
+ * Genera un prefijo corto para búsquedas tolerantes a tildes.
+ * Ej: "ferreteria" → "ferreteri" matchea "Ferretería" y "FERRETERIA".
+ */
+const makeStem = (term: string): string => {
+  const safe = sanitizeTerm(normalizeText(term));
+  return safe.length > 5 ? safe.slice(0, Math.max(5, safe.length - 2)) : safe;
 };
 
-const toIndexedCatalogItems = (items: CatalogItem[]): IndexedCatalogItem[] => {
-  return items.map((item) => {
-    const nombre = normalizeText(item.nombre);
-    const tipo = normalizeText(item.tipo);
-    const descripcion = normalizeText(item.descripcion);
-    const ubicacion = normalizeText(item.ubicacion);
-    const contacto = normalizeText(item.contacto);
-    const horario = normalizeText(item.horario);
-    const extras = normalizeText(item.extras);
+/**
+ * Construye la query TQ para gviz usando letras de columna (A, B, C…).
+ * Retorna null si no hay términos válidos.
+ */
+const buildGvizQuery = (
+  rubroTerms: string[],
+  locationTerms: string[],
+  limit: number
+): string | null => {
+  const conditions: string[] = [];
 
-    return {
-      item,
-      nombre,
-      tipo,
-      descripcion,
-      ubicacion,
-      contacto,
-      horario,
-      extras,
-      blob: `${nombre} ${tipo} ${descripcion} ${ubicacion} ${contacto} ${horario} ${extras}`.trim()
-    };
-  });
+  if (rubroTerms.length > 0) {
+    // Buscar en Nombre (C), Actividad principal (D), y actividades secundarias (J,K,L,M)
+    const actCols = ["C", "D", "J", "K", "L", "M"];
+    const parts = rubroTerms.flatMap((t) => {
+      const stem = makeStem(t);
+      if (!stem) return [];
+      return actCols.map((col) => `lower(${col}) contains '${stem}'`);
+    });
+    if (parts.length > 0) conditions.push(`(${parts.join(" or ")})`);
+  }
+
+  if (locationTerms.length > 0) {
+    // Buscar en Departamento (A) y Municipio (B)
+    const locCols = ["A", "B"];
+    const parts = locationTerms.flatMap((t) => {
+      const stem = makeStem(t);
+      if (!stem) return [];
+      return locCols.map((col) => `lower(${col}) contains '${stem}'`);
+    });
+    if (parts.length > 0) conditions.push(`(${parts.join(" or ")})`);
+  }
+
+  if (conditions.length === 0) return null;
+  return `select * where ${conditions.join(" and ")} limit ${limit}`;
 };
 
-const fetchItemsFromSheet = async (): Promise<CatalogItem[]> => {
+/** Fila de cabeceras del sheet — se usa para saltar la primera fila en resultados */
+const HEADER_ROW_IDENTIFIER = "LISTA DE EMPRESAS";
+
+const makeSheetUrl = (tq: string): string => {
   const url = new URL(
     `https://docs.google.com/spreadsheets/d/${env.SHEETS_SPREADSHEET_ID}/gviz/tq`
   );
   url.searchParams.set("tqx", "out:json");
   url.searchParams.set("sheet", env.SHEETS_SHEET_NAME);
   url.searchParams.set("range", env.SHEETS_RANGE);
+  url.searchParams.set("tq", tq);
+  return url.toString();
+};
 
+const fetchFromSheet = async (tq: string): Promise<CatalogItem[]> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SHEETS_REQUEST_TIMEOUT_MS);
-
   try {
-    const response = await fetch(url.toString(), { signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`Error leyendo Google Sheets: ${response.status}`);
-    }
-
+    const response = await fetch(makeSheetUrl(tq), { signal: controller.signal });
+    if (!response.ok) throw new Error(`Google Sheets error: ${response.status}`);
     const payload = await response.text();
     const parsed = parseGvizResponse(payload);
-    const rows: Array<{ c: Array<{ v: unknown } | null> }> = parsed?.table?.rows ?? [];
-
+    const rows: Array<{ c: Array<{ v: unknown; f?: string } | null> }> = parsed?.table?.rows ?? [];
     return rows
-      .map((row) => row.c.map((cell) => cell?.v ?? ""))
+      .map((row) => row.c.map((cell) => cell?.f ?? cell?.v ?? ""))
+      .filter((cells) => !String(cells[0] ?? "").includes(HEADER_ROW_IDENTIFIER))
       .map(toEmpresaItem)
-      .filter((item) => item.nombre.length > 0);
+      .filter((item) => item.nombre.length > 1 && !item.nombre.includes(HEADER_ROW_IDENTIFIER));
   } finally {
     clearTimeout(timeout);
   }
 };
 
-export const getCatalogItems = async (): Promise<CatalogItem[]> => {
-  if (isCacheValid() && cache) {
-    return cache.items;
-  }
 
-  if (inflightRequest) {
-    return inflightRequest;
-  }
 
-  inflightRequest = (async () => {
-    try {
-      const items = await fetchItemsFromSheet();
+// ── Lector CSV local (alternativa a Google Sheets) ─────────────────────
+// Convierte una fila CSV a array de valores (maneja campos entre comillas)
+const parseCsvRow = (line: string): string[] => {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
 
-      const indexed = toIndexedCatalogItems(items);
-      cache = { updatedAt: Date.now(), items, indexed };
-      staleCache = { items, indexed };
-
-      return items;
-    } catch (error) {
-      if (staleCache && staleCache.items.length > 0) {
-        return staleCache.items;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
       }
-      throw error;
-    } finally {
-      inflightRequest = null;
+    } else if (ch === "," && !inQuotes) {
+      fields.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
     }
-  })();
-
-  return inflightRequest;
-};
-
-export const findRelevantCatalogItems = (
-  items: CatalogItem[],
-  query: string,
-  maxItems = 10
-): CatalogItem[] => {
-  const terms = tokenize(query);
-
-  if (terms.length === 0) {
-    return items.slice(0, maxItems);
   }
 
-  const indexed = cache && cache.items === items ? cache.indexed : toIndexedCatalogItems(items);
-  const normalizedQuery = normalizeText(query);
-
-  const scored = indexed
-    .map((entry) => {
-      let score = 0;
-
-      for (const term of terms) {
-        let termScore = 0;
-
-        if (entry.nombre.includes(term)) {
-          termScore = Math.max(termScore, 4);
-        }
-        if (entry.tipo.includes(term)) {
-          termScore = Math.max(termScore, 5); // tipo es el campo mas relevante
-        }
-        if (entry.descripcion.includes(term) || entry.ubicacion.includes(term)) {
-          termScore = Math.max(termScore, 2);
-        }
-        if (entry.blob.includes(term)) {
-          termScore = Math.max(termScore, 1);
-        }
-
-        score += termScore;
-      }
-
-      if (normalizedQuery.length >= 3 && entry.tipo.includes(normalizedQuery)) {
-        score += 5;
-      } else if (normalizedQuery.length >= 3 && entry.nombre.includes(normalizedQuery)) {
-        score += 4;
-      }
-
-      return { item: entry.item, score };
-    })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxItems)
-    .map((entry) => entry.item);
-
-  return scored.length > 0 ? scored : items.slice(0, maxItems);
+  fields.push(current.trim());
+  return fields;
 };
+
+const readItemsFromCsvFile = (filePath: string): CatalogItem[] => {
+  const absolutePath = resolve(filePath);
+  const raw = readFileSync(absolutePath, "utf-8");
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+
+  // Saltar fila de encabezados
+  return lines
+    .slice(1)
+    .map((line) => parseCsvRow(line))
+    .map(toEmpresaItem)
+    .filter((item) => item.nombre.length > 0);
+};
+
+// ── API Pública ───────────────────────────────────────────────────────────────
+
+/**
+ * Busca empresas enviando una consulta filtrada directamente a Google Sheets.
+ * No carga las 118k filas: filtra en servidor y cachea cada resultado 3 min.
+ */
+export const searchCatalog = async (
+  rubroTerms: string[],
+  locationTerms: string[],
+  limit = 15
+): Promise<CatalogItem[]> => {
+  if (env.CATALOG_FILE_PATH) {
+    const items = readItemsFromCsvFile(env.CATALOG_FILE_PATH);
+    return filterCsvItems(items, rubroTerms, locationTerms, limit);
+  }
+
+  const tq = buildGvizQuery(rubroTerms, locationTerms, limit);
+  if (!tq) return [];
+
+  const cached = queryCache.get(tq);
+  if (cached && Date.now() - cached.cachedAt < QUERY_CACHE_TTL_MS) {
+    return cached.results;
+  }
+
+  const results = await fetchFromSheet(tq);
+
+  if (queryCache.size >= QUERY_CACHE_MAX_ENTRIES) {
+    const oldest = [...queryCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)[0];
+    queryCache.delete(oldest[0]);
+  }
+  queryCache.set(tq, { results, cachedAt: Date.now() });
+  return results;
+};
+
+/**
+ * Total de empresas en el directorio (cacheado 10 min).
+ * Se usa como contexto informativo en el prompt de Gemini.
+ */
+export const getTotalCount = async (): Promise<number> => {
+  if (totalCountCache && Date.now() - totalCountCache.cachedAt < TOTAL_COUNT_TTL_MS) {
+    return totalCountCache.count;
+  }
+  if (env.CATALOG_FILE_PATH) return 0;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SHEETS_REQUEST_TIMEOUT_MS);
+    const url = makeSheetUrl("select count(A)");
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return totalCountCache?.count ?? 0;
+    const payload = await response.text();
+    const parsed = parseGvizResponse(payload);
+    const rows = parsed?.table?.rows ?? [];
+    const count = Number(rows[0]?.c?.[0]?.v ?? 0);
+    // El count de gviz con headers incluye la fila de cabecera; restamos 1
+    const real = count > 1 ? count - 1 : count;
+    if (real > 0) totalCountCache = { count: real, cachedAt: Date.now() };
+    return real;
+  } catch {
+    return totalCountCache?.count ?? 0;
+  }
+};
+
+// ── Filtro para modo CSV local ────────────────────────────────────────────────
+const filterCsvItems = (
+  items: CatalogItem[],
+  rubroTerms: string[],
+  locationTerms: string[],
+  limit: number
+): CatalogItem[] => {
+  if (rubroTerms.length === 0 && locationTerms.length === 0) return items.slice(0, limit);
+  const rubroNorm = rubroTerms.map(normalizeText);
+  const locNorm   = locationTerms.map(normalizeText);
+  return items
+    .filter((item) => {
+      const actBlob = normalizeText(item.actividades.join(" ") + " " + item.nombre);
+      const locBlob = normalizeText(item.departamento + " " + item.municipio);
+      const rubroOk = rubroNorm.length === 0 || rubroNorm.some((t) => actBlob.includes(t));
+      const locOk   = locNorm.length === 0   || locNorm.some((t) => locBlob.includes(t));
+      return rubroOk && locOk;
+    })
+    .slice(0, limit);
+};
+
