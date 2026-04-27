@@ -64,7 +64,8 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
         memory,
         sessionName: "main",
         relevantItems,
-        totalCatalogItems
+        totalCatalogItems,
+        matchingCount: relevantItems.length,
       });
 
       addConversationTurnScoped("main", from, { role: "user", text, at: Date.now() }, intent, []);

@@ -10,6 +10,18 @@ import {
 
 const MAIN_SESSION = "main";
 
+// ── Message debounce buffer ───────────────────────────────────────────────────
+// Agrupa mensajes rápidos del mismo usuario (WhatsApp suele fragmentar mensajes)
+// Espera DEBOUNCE_MS sin actividad antes de procesar el bloque completo.
+const DEBOUNCE_MS = 2500;
+
+interface PendingBuffer {
+  messages: string[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const pendingBuffers = new Map<string, PendingBuffer>();
+
 /** Departamentos de Bolivia para detectar ubicación en el mensaje */
 const BOLIVIA_DEPARTMENTS = [
   "la paz", "santa cruz", "cochabamba", "oruro", "potosi",
@@ -71,6 +83,14 @@ const STOP_WORDS = new Set([
   "dame", "dime", "puedes", "mostrar", "ver", "listar", "lista",
   "encontrar", "buscar", "empresa", "empresas", "negocio", "negocios",
   "mas", "todo", "todos", "o", "y", "a", "e", "al",
+  // Saludos y palabras de tiempo que no son rubros
+  "hola", "buenas", "buenos", "buen", "dias", "tardes", "noches",
+  "noche", "dia", "tarde", "mañana", "manana", "hey", "holi",
+  "gracias", "ok", "okay", "oki", "sip", "claro", "perfecto",
+  "ayuda", "ayudame", "informacion", "info",
+  "mi", "mis", "tu", "sus", "su", "nuestro",
+  "quieres", "quiero", "quisiera", "podrias", "podria",
+  "favor", "porfavor", "por",
 ]);
 
 const normalizeSimple = (text: string): string =>
@@ -128,20 +148,12 @@ const calculateDelay = (textLength: number): number => {
   return Math.round(base + jitter);
 };
 
-export const handleIncomingMessage = async (
-  payload: { from: string; text: string; messageId: string },
+/** Procesa un bloque de texto (puede ser la combinación de varios mensajes rápidos). */
+const processMessage = async (
+  from: string,
+  incomingText: string,
   transport: IWhatsAppTransport
 ): Promise<void> => {
-  const { from, text, messageId } = payload;
-  const incomingText = text.trim();
-
-  if (!incomingText) {
-    return;
-  }
-
-  // Marcar como leido (muestra ticks azules)
-  await transport.markMessageAsRead(messageId);
-
   const intent = detectIntent(incomingText);
   const memory = getConversationMemoryScoped(MAIN_SESSION, from);
 
@@ -150,9 +162,21 @@ export const handleIncomingMessage = async (
   if (detectedDept) {
     memory.lastUbicacion = detectedDept;
   }
-  // Si el mensaje es corto (<=5 palabras) y no parece una pregunta, es un rubro
+
+  // Extraer rubro del mensaje actual (independientemente de la longitud)
+  const rubroFromText = extractRubroTerms(incomingText, detectedDept ? [detectedDept] : []);
+
+  // Guardar rubro detectado en memoria para turnos futuros
+  if (rubroFromText.length > 0 && !detectedDept) {
+    memory.lastRubro = rubroFromText.join(" ");
+  } else if (rubroFromText.length > 0 && !memory.lastRubro) {
+    // Mensaje mixto (rubro + ubicación): guardar la parte del rubro
+    memory.lastRubro = rubroFromText.join(" ");
+  }
+
+  // Si el mensaje es corto (<=3 palabras) y sin dept ni stop words, probablemente es solo rubro
   const wordCount = incomingText.trim().split(/\s+/).length;
-  if (!detectedDept && wordCount <= 5 && !incomingText.includes("?")) {
+  if (!detectedDept && wordCount <= 3 && !incomingText.includes("?") && rubroFromText.length === 0) {
     memory.lastRubro = incomingText.trim();
   }
 
@@ -162,7 +186,6 @@ export const handleIncomingMessage = async (
   const rubroFromMemory = memory.lastRubro
     ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
     : [];
-  const rubroFromText = extractRubroTerms(incomingText, locationTerms);
   const rubroTerms = [...new Set([...rubroFromMemory, ...rubroFromText])].slice(0, 6);
 
   logger.info({ from, intent, rubroTerms, locationTerms }, "Procesando mensaje");
@@ -180,6 +203,7 @@ export const handleIncomingMessage = async (
       sessionName: MAIN_SESSION,
       relevantItems,
       totalCatalogItems,
+      matchingCount: relevantItems.length,
     });
 
     await sleep(calculateDelay(reply.length));
@@ -190,6 +214,46 @@ export const handleIncomingMessage = async (
   } catch (error) {
     logger.error({ error, from }, "Error al procesar mensaje");
     await transport.sendTextMessage(from, "Disculpa, tuve un problema al procesar tu consulta. Por favor intenta nuevamente. 🙏");
+  }
+};
+
+export const handleIncomingMessage = async (
+  payload: { from: string; text: string; messageId: string },
+  transport: IWhatsAppTransport
+): Promise<void> => {
+  const { from, text, messageId } = payload;
+  const incomingText = text.trim();
+
+  if (!incomingText) {
+    return;
+  }
+
+  // Marcar como leido (muestra ticks azules)
+  await transport.markMessageAsRead(messageId);
+
+  // ── Debounce: agrupar mensajes rápidos del mismo usuario ────────────────
+  const existing = pendingBuffers.get(from);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.messages.push(incomingText);
+    existing.timer = setTimeout(async () => {
+      const buffer = pendingBuffers.get(from);
+      if (!buffer) return;
+      pendingBuffers.delete(from);
+      const combined = buffer.messages.join(" ");
+      logger.info({ from, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
+      await processMessage(from, combined, transport);
+    }, DEBOUNCE_MS);
+  } else {
+    const timer = setTimeout(async () => {
+      const buffer = pendingBuffers.get(from);
+      if (!buffer) return;
+      pendingBuffers.delete(from);
+      const combined = buffer.messages.join(" ");
+      logger.info({ from, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
+      await processMessage(from, combined, transport);
+    }, DEBOUNCE_MS);
+    pendingBuffers.set(from, { messages: [incomingText], timer });
   }
 };
 

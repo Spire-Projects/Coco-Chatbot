@@ -119,11 +119,15 @@ const getPromptFingerprint = async (sessionName: string): Promise<string> => {
 };
 
 export const initializePromptStore = async (): Promise<void> => {
-  await ensurePrompt(GLOBAL_PROMPT_TARGET, buildGlobalPromptSeed());
+  // Siempre sobreescribir el prompt global con el seed del código para que los
+  // cambios en defaults.ts se apliquen en cada arranque del servidor.
+  await upsertPrompt(GLOBAL_PROMPT_TARGET, buildGlobalPromptSeed());
 
   for (const profile of sessionProfiles) {
     await ensurePrompt(getSessionPromptTarget(profile.sessionId), buildSessionPromptSeed(profile));
   }
+
+  invalidateChatCacheForAllSessions();
 
   logger.info(
     { totalSessions: sessionProfiles.length },

@@ -7,6 +7,40 @@ import type { CatalogItem, ConversationMemory, SalesIntent } from "./types.js";
 const modelNotConfiguredMessage =
   "Hola! Puedo ayudarte con informacion de empresas, pero la IA aun no esta configurada. Contacta al administrador.";
 
+/**
+ * Respuesta de fallback cuando Gemini no está disponible (403/503/agotado).
+ * Devuelve directamente los resultados del directorio sin IA.
+ */
+const buildFallbackReply = (input: {
+  relevantItems: CatalogItem[];
+  matchingCount: number;
+  memory: ConversationMemory;
+}): string => {
+  const { relevantItems, matchingCount, memory } = input;
+  const rubro = memory.lastRubro || "ese rubro";
+  const ciudad = memory.lastUbicacion || "";
+
+  if (relevantItems.length === 0) {
+    const contexto = [rubro, ciudad].filter(Boolean).join(" en ");
+    return `😕 No encontré empresas de *${contexto}* en el directorio en este momento.\n\n¿Quieres intentar con otro rubro o ciudad?`;
+  }
+
+  const header = ciudad
+    ? `🔍 Aquí tienes empresas de *${rubro}* en *${ciudad.charAt(0).toUpperCase() + ciudad.slice(1)}*:`
+    : `🔍 Aquí tienes empresas de *${rubro}*:`;
+
+  const lista = relevantItems
+    .slice(0, 5)
+    .map((item, i) => `--- Empresa ${i + 1} ---\n${formatCatalogLine(item)}`)
+    .join("\n\n");
+
+  const extra = matchingCount > 5
+    ? `\n\n🔎 ¡Y hay *${matchingCount - 5} empresas más*! Dime si quieres ver más resultados.`
+    : "";
+
+  return `${header}\n\n${lista}${extra}`;
+};
+
 const formatCatalogLine = (item: CatalogItem): string => {
   const ubicacion  = [item.departamento, item.municipio].filter(Boolean).join(", ");
   const actExtras  = item.actividades.slice(1).filter(Boolean);
@@ -74,6 +108,7 @@ export const generateReply = async (input: {
   sessionName: string;
   relevantItems: CatalogItem[];
   totalCatalogItems: number;
+  matchingCount: number;
 }): Promise<string> => {
   if (!env.GEMINI_API_KEY) {
     return modelNotConfiguredMessage;
@@ -87,18 +122,24 @@ export const generateReply = async (input: {
 
   const resolvedPrompt = await resolvePromptForSession(input.sessionName);
 
+  const isFirstMessage = input.memory.turns.length === 0;
+
   const systemPrompt = [
     resolvedPrompt.prompt,
     "Responde en espanol claro y conciso.",
     "Usa siempre la informacion del directorio entregado para responder.",
     "Si no encuentras coincidencias exactas, sugiere opciones similares del directorio.",
-    "Nunca inventes informacion que no este en el directorio."
+    "Nunca inventes informacion que no este en el directorio.",
+    isFirstMessage
+      ? "Es el PRIMER mensaje de esta conversacion: preséntate brevemente como CoCo 🥥."
+      : "NO es el primer mensaje: PROHIBIDO saludar con '¡Hola!' ni presentarte de nuevo. Responde directamente con emojis naturales.",
   ].join(" ");
 
   const prompt = [
     `INTENCION: ${input.intent}`,
     `HORA: ${getDateTimeContext()}`,
     `MENSAJE DEL USUARIO: ${input.userMessage}`,
+    `EMPRESAS ENCONTRADAS PARA ESTA BUSQUEDA: ${input.matchingCount}`,
     `TOTAL EMPRESAS EN DIRECTORIO: ${input.totalCatalogItems}`,
     "EMPRESAS RELEVANTES:",
     formatItems(input.relevantItems),
@@ -107,7 +148,7 @@ export const generateReply = async (input: {
     "RESPUESTA:"
   ].join("\n\n");
 
-  // Retry con backoff exponencial para manejar rate limits 429
+  // Retry con backoff exponencial para rate limits (429) y errores transitorios (500/502/503)
   const MAX_RETRIES = 3;
   let lastError: unknown;
 
@@ -121,16 +162,29 @@ export const generateReply = async (input: {
     } catch (err) {
       lastError = err;
       const status = (err as { status?: number })?.status;
-      if (status === 429 && attempt < MAX_RETRIES) {
-        // Esperar antes de reintentar: 20s, 40s
-        const waitMs = attempt * 20_000;
-        logger.warn({ attempt, waitMs }, "Gemini 429 — reintentando");
+      const isRetryable = status === 429 || status === 500 || status === 502 || status === 503;
+      if (isRetryable && attempt < MAX_RETRIES) {
+        // 429 → espera larga (20s, 40s); 5xx → espera corta (3s, 6s)
+        const waitMs = status === 429 ? attempt * 20_000 : attempt * 3_000;
+        logger.warn({ attempt, waitMs, status }, `Gemini ${status} — reintentando`);
         await new Promise((res) => setTimeout(res, waitMs));
         continue;
       }
-      throw err;
+      // Error no reintentable (403, 400, etc.) o reintentos agotados → fallback directo
+      logger.warn({ status, attempt }, "Gemini no disponible — usando fallback de directorio");
+      return buildFallbackReply({
+        relevantItems: input.relevantItems,
+        matchingCount: input.matchingCount,
+        memory: input.memory,
+      });
     }
   }
 
-  throw lastError;
+  // Reintentos agotados → fallback
+  logger.warn("Gemini: reintentos agotados — usando fallback de directorio");
+  return buildFallbackReply({
+    relevantItems: input.relevantItems,
+    matchingCount: input.matchingCount,
+    memory: input.memory,
+  });
 };
