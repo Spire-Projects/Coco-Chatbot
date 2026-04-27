@@ -5,7 +5,10 @@ import type {
   SessionsResponse
 } from "../features/sessions/types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3100";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
+if (!API_BASE_URL) {
+  throw new Error("VITE_API_BASE_URL no está definida. Agrega la variable de entorno antes de compilar.");
+}
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(`${API_BASE_URL}${path}`, {
