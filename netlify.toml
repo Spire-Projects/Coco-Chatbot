@@ -1,7 +1,7 @@
 [build]
   base    = "admin-chatbot"
   command = "npm run build"
-  publish = "admin-chatbot/dist"
+  publish = "dist"
 
 [[redirects]]
   from   = "/*"
