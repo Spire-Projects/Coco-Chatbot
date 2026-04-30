@@ -1,11 +1,5 @@
 import type { ChatRow } from "../sessions/types";
 
-interface ChatListItemProps {
-  chat: ChatRow;
-  isSelected: boolean;
-  onClick: () => void;
-}
-
 const formatTime = (iso: string): string => {
   const date = new Date(iso);
   const now = new Date();
