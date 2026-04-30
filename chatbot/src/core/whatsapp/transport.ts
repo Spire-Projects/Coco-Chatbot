@@ -16,6 +16,13 @@ export interface IncomingMessage {
 
 export type IncomingMessageHandler = (msg: IncomingMessage) => Promise<void>;
 
+export type ConnectionStatus = "starting" | "waiting_qr" | "connected" | "reconnecting";
+
+export interface ConnectionState {
+  status: ConnectionStatus;
+  qrRaw: string | null;
+}
+
 export interface IWhatsAppTransport {
   /** Envía un mensaje de texto plano al destinatario indicado */
   sendTextMessage(to: string, text: string): Promise<void>;
@@ -32,4 +39,13 @@ export interface IWhatsAppTransport {
 
   /** Cierra la conexión limpiamente */
   disconnect(): Promise<void>;
+
+  /** Retorna el estado actual de conexión */
+  getConnectionState(): ConnectionState;
+
+  /**
+   * Registra un callback que se invoca cada vez que el estado cambia.
+   * Retorna una función para cancelar la suscripción.
+   */
+  onConnectionStateChange(cb: (state: ConnectionState) => void): () => void;
 }

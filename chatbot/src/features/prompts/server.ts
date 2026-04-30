@@ -13,6 +13,17 @@ import type { IWhatsAppTransport } from "../../core/whatsapp/transport.js";
 export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
   const app = express();
 
+  // Clientes SSE suscritos al estado de conexión
+  const sseClients = new Set<express.Response>();
+
+  // Propagamos cambios de estado a todos los clientes SSE conectados
+  const unsubscribeState = transport.onConnectionStateChange((state) => {
+    const data = JSON.stringify(state);
+    for (const res of sseClients) {
+      res.write(`data: ${data}\n\n`);
+    }
+  });
+
   app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -37,6 +48,25 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
 
   // API de prompts
   app.use("/api/prompts", createPromptRouter());
+
+  // Estado de conexión WhatsApp (snapshot)
+  app.get("/api/status", (_req, res) => {
+    res.json(transport.getConnectionState());
+  });
+
+  // Estado de conexión WhatsApp (tiempo real via SSE)
+  app.get("/api/status/events", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Enviar estado actual al conectarse
+    res.write(`data: ${JSON.stringify(transport.getConnectionState())}\n\n`);
+
+    sseClients.add(res);
+    req.on("close", () => sseClients.delete(res));
+  });
 
   // Endpoint de prueba HTTP — simula mensajes sin necesitar WhatsApp conectado
   app.post("/test", async (req, res) => {
@@ -96,6 +126,8 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
     logger.info(`Admin panel: http://localhost:${env.API_PORT}/admin`);
     logger.info(`Webhook URL: http://localhost:${env.API_PORT}/webhook`);
   });
+
+  server.on("close", unsubscribeState);
 
   return server;
 };

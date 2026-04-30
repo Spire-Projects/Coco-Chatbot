@@ -1,6 +1,6 @@
 import { env } from "../../../config/env.js";
 import { logger } from "../../logger.js";
-import type { IWhatsAppTransport, IncomingMessageHandler } from "../transport.js";
+import type { ConnectionState, IWhatsAppTransport, IncomingMessageHandler } from "../transport.js";
 
 const META_API_BASE = "https://graph.facebook.com";
 
@@ -69,5 +69,13 @@ export class MetaTransport implements IWhatsAppTransport {
         message_id: messageId
       })
     }).catch(() => undefined);
+  }
+
+  getConnectionState(): ConnectionState {
+    return { status: "connected", qrRaw: null };
+  }
+
+  onConnectionStateChange(_cb: (state: ConnectionState) => void): () => void {
+    return () => undefined;
   }
 }

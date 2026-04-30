@@ -9,7 +9,7 @@ import { Boom } from "@hapi/boom";
 import qrcodeTerminal from "qrcode-terminal";
 import pino from "pino";
 import { logger } from "../../logger.js";
-import type { IWhatsAppTransport, IncomingMessageHandler } from "../transport.js";
+import type { ConnectionState, IWhatsAppTransport, IncomingMessageHandler } from "../transport.js";
 
 // Carpeta donde Baileys guarda las credenciales de sesión
 const AUTH_FOLDER = "./baileys_auth";
@@ -23,6 +23,15 @@ export class BaileysTransport implements IWhatsAppTransport {
 
   // Mapa messageId → WAMessageKey para poder marcar mensajes como leídos
   private messageKeys = new Map<string, WAMessageKey>();
+
+  // Estado de conexión expuesto al servidor
+  private _state: ConnectionState = { status: "starting", qrRaw: null };
+  private _listeners = new Set<(s: ConnectionState) => void>();
+
+  private _setState(next: ConnectionState): void {
+    this._state = next;
+    for (const cb of this._listeners) cb(next);
+  }
 
   async connect(onMessage: IncomingMessageHandler): Promise<void> {
     this.handler = onMessage;
@@ -69,10 +78,12 @@ export class BaileysTransport implements IWhatsAppTransport {
         console.log("  El QR se regenera automáticamente si expira.");
         console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         console.log();
+        this._setState({ status: "waiting_qr", qrRaw: qr });
       }
 
       if (connection === "close") {
         const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        this._setState({ status: "reconnecting", qrRaw: null });
 
         if (reason === DisconnectReason.loggedOut) {
           // El usuario cerró la sesión desde su teléfono → limpiar auth y generar nuevo QR
@@ -96,6 +107,7 @@ export class BaileysTransport implements IWhatsAppTransport {
       if (connection === "open") {
         console.clear();
         logger.info("WhatsApp conectado — el chatbot esta listo");
+        this._setState({ status: "connected", qrRaw: null });
       }
     });
 
@@ -169,5 +181,14 @@ export class BaileysTransport implements IWhatsAppTransport {
     this.socket = null;
     this.messageKeys.clear();
     logger.info("BaileysTransport desconectado");
+  }
+
+  getConnectionState(): ConnectionState {
+    return this._state;
+  }
+
+  onConnectionStateChange(cb: (state: ConnectionState) => void): () => void {
+    this._listeners.add(cb);
+    return () => this._listeners.delete(cb);
   }
 }
