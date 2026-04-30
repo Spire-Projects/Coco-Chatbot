@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { env } from "../../config/env.js";
 import { logger } from "../../core/logger.js";
 import { createPromptRouter } from "./routes.js";
+import { createChatsRouter } from "../chats/routes.js";
 import { createWhatsAppWebhookRouter } from "../../core/whatsapp/webhook.js";
 import { searchCatalog, getTotalCount } from "../sales-assistant/catalog.js";
 import { generateReply } from "../sales-assistant/gemini.js";
@@ -48,6 +49,9 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
 
   // API de prompts
   app.use("/api/prompts", createPromptRouter());
+
+  // API de chats / conversaciones
+  app.use("/api/chats", createChatsRouter());
 
   // Estado de conexión WhatsApp (snapshot)
   app.get("/api/status", (_req, res) => {

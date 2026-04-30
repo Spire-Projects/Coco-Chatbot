@@ -17,6 +17,36 @@ const AUTH_FOLDER = "./baileys_auth";
 // Logger silencioso para los mensajes internos de Baileys
 const baileysInternalLogger = pino({ level: "silent" });
 
+/**
+ * Resuelve un JID de tipo LID (@lid) al número de teléfono real.
+ * Baileys guarda el mapeo en baileys_auth/lid-mapping-{LID}_reverse.json.
+ * El contenido del archivo es simplemente el número de teléfono como string JSON.
+ * Si no se puede resolver, devuelve undefined.
+ */
+const resolveLidToPhone = async (lid: string): Promise<string | undefined> => {
+  try {
+    const raw = await fs.readFile(`${AUTH_FOLDER}/lid-mapping-${lid}_reverse.json`, "utf8");
+    const phone = JSON.parse(raw) as string;
+    return typeof phone === "string" && phone.length > 0 ? phone : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Extrae el número de teléfono más legible de un JID.
+ * - JID normal: "59176435692@s.whatsapp.net" → "59176435692"
+ * - LID:        "157440834318350@lid"         → resuelve con el archivo de mapeo
+ */
+const phoneFromJid = async (jid: string): Promise<string> => {
+  const bare = jid.split("@")[0];
+  if (jid.endsWith("@lid")) {
+    const resolved = await resolveLidToPhone(bare);
+    return resolved ?? bare; // fallback al LID si no hay mapeo
+  }
+  return bare;
+};
+
 export class BaileysTransport implements IWhatsAppTransport {
   private socket: ReturnType<typeof makeWASocket> | null = null;
   private handler: IncomingMessageHandler | null = null;
@@ -146,9 +176,12 @@ export class BaileysTransport implements IWhatsAppTransport {
           this.messageKeys.set(messageId, msg.key);
         }
 
-        logger.info({ from }, "Mensaje entrante (Baileys)");
+        // Resolver LID → número de teléfono real para almacenamiento
+        const phone = await phoneFromJid(from);
 
-        this.handler?.({ from, text, messageId }).catch((err: unknown) => {
+        logger.info({ from, phone }, "Mensaje entrante (Baileys)");
+
+        this.handler?.({ from, text, messageId, phone }).catch((err: unknown) => {
           logger.error({ err, from }, "Error procesando mensaje entrante");
         });
       }

@@ -12,6 +12,8 @@ export interface IncomingMessage {
   from: string;
   text: string;
   messageId: string;
+  /** Número de teléfono normalizado (resuelto). Puede diferir de `from` cuando Baileys usa LIDs. */
+  phone: string;
 }
 
 export type IncomingMessageHandler = (msg: IncomingMessage) => Promise<void>;

@@ -61,7 +61,8 @@ export const createWhatsAppWebhookRouter = (transport: IWhatsAppTransport): Rout
 
           logger.info({ from, messageId }, "Mensaje entrante de WhatsApp recibido");
 
-          handleIncomingMessage({ from, text, messageId }, transport).catch((error) => {
+          // Para Meta, from ya es el número de teléfono
+          handleIncomingMessage({ from, text, messageId, phone: from }, transport).catch((error) => {
             logger.error({ error, from }, "Error al procesar mensaje entrante");
           });
         }

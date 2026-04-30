@@ -7,6 +7,7 @@ import {
   addConversationTurnScoped,
   getConversationMemoryScoped
 } from "./memory.js";
+import { saveChatTurn } from "../chats/store.js";
 
 const MAIN_SESSION = "main";
 
@@ -151,11 +152,13 @@ const calculateDelay = (textLength: number): number => {
 /** Procesa un bloque de texto (puede ser la combinación de varios mensajes rápidos). */
 const processMessage = async (
   from: string,
+  phone: string,
   incomingText: string,
   transport: IWhatsAppTransport
 ): Promise<void> => {
   const intent = detectIntent(incomingText);
-  const memory = getConversationMemoryScoped(MAIN_SESSION, from);
+  // La clave de memoria usa el phone real para ser consistente con el almacenamiento
+  const memory = getConversationMemoryScoped(MAIN_SESSION, phone);
 
   // ── Actualizar contexto de memoria ───────────────────────────────────
   const detectedDept = detectDepartment(incomingText);
@@ -188,7 +191,7 @@ const processMessage = async (
     : [];
   const rubroTerms = [...new Set([...rubroFromMemory, ...rubroFromText])].slice(0, 6);
 
-  logger.info({ from, intent, rubroTerms, locationTerms }, "Procesando mensaje");
+  logger.info({ from, phone, intent, rubroTerms, locationTerms }, "Procesando mensaje");
 
   try {
     const [relevantItems, totalCatalogItems] = await Promise.all([
@@ -209,19 +212,27 @@ const processMessage = async (
     await sleep(calculateDelay(reply.length));
     await transport.sendTextMessage(from, reply);
 
-    addConversationTurnScoped(MAIN_SESSION, from, { role: "user", text: incomingText, at: Date.now() }, intent, []);
-    addConversationTurnScoped(MAIN_SESSION, from, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+    addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+    addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+
+    // Persistir turno en Turso (fire-and-forget)
+    void saveChatTurn({
+      phone,
+      userMessage: incomingText,
+      botReply: reply,
+      intent,
+    });
   } catch (error) {
-    logger.error({ error, from }, "Error al procesar mensaje");
+    logger.error({ error, from, phone }, "Error al procesar mensaje");
     await transport.sendTextMessage(from, "Disculpa, tuve un problema al procesar tu consulta. Por favor intenta nuevamente. 🙏");
   }
 };
 
 export const handleIncomingMessage = async (
-  payload: { from: string; text: string; messageId: string },
+  payload: { from: string; text: string; messageId: string; phone: string },
   transport: IWhatsAppTransport
 ): Promise<void> => {
-  const { from, text, messageId } = payload;
+  const { from, phone, text, messageId } = payload;
   const incomingText = text.trim();
 
   if (!incomingText) {
@@ -241,8 +252,8 @@ export const handleIncomingMessage = async (
       if (!buffer) return;
       pendingBuffers.delete(from);
       const combined = buffer.messages.join(" ");
-      logger.info({ from, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
-      await processMessage(from, combined, transport);
+      logger.info({ from, phone, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
+      await processMessage(from, phone, combined, transport);
     }, DEBOUNCE_MS);
   } else {
     const timer = setTimeout(async () => {
@@ -250,8 +261,8 @@ export const handleIncomingMessage = async (
       if (!buffer) return;
       pendingBuffers.delete(from);
       const combined = buffer.messages.join(" ");
-      logger.info({ from, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
-      await processMessage(from, combined, transport);
+      logger.info({ from, phone, messages: buffer.messages.length, combined }, "Procesando bloque de mensajes");
+      await processMessage(from, phone, combined, transport);
     }, DEBOUNCE_MS);
     pendingBuffers.set(from, { messages: [incomingText], timer });
   }

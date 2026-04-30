@@ -1,4 +1,4 @@
-import type { ConnectionState, PromptState } from "../features/sessions/types";
+import type { ChatsPage, ConnectionState, MessagesPage, PromptState } from "../features/sessions/types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
 if (!API_BASE_URL) {
@@ -35,5 +35,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ content })
     });
+  },
+  listChats: async (limit = 30, offset = 0): Promise<ChatsPage> => {
+    return request<ChatsPage>(`/api/chats?limit=${limit}&offset=${offset}`);
+  },
+  listMessages: async (phone: string, limit = 20, offset = 0): Promise<MessagesPage> => {
+    return request<MessagesPage>(`/api/chats/${encodeURIComponent(phone)}/messages?limit=${limit}&offset=${offset}`);
   }
 };
