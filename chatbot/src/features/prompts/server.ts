@@ -209,7 +209,6 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <script>
     const base = '/api/prompts';
 
@@ -327,15 +326,9 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
       wsHint.style.color = color || '#666';
     }
 
-    async function renderQr(text) {
-      qrWrap.innerHTML = '';
-      const canvas = document.createElement('canvas');
-      qrWrap.appendChild(canvas);
-      try {
-        await QRCode.toCanvas(canvas, text, { width: 220, margin: 2 });
-      } catch (e) {
-        qrWrap.innerHTML = '<span class="msg err">Error generando QR ' + e + '</span>';
-      }
+    function renderQr(text) {
+      const url = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(text);
+      qrWrap.innerHTML = '<img src="' + url + '" alt="QR WhatsApp" style="display:block;width:220px;height:220px;">';
     }
 
     const es = new EventSource('/api/status/events');
