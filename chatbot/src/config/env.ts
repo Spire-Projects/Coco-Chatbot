@@ -26,7 +26,7 @@ export const env = {
   GEMINI_MODEL: process.env.GEMINI_MODEL ?? "gemini-1.5-flash",
 
   // API Server
-  API_PORT: parseNumber(process.env.API_PORT, 3100),
+  API_PORT: parseNumber(process.env.API_PORT ?? process.env.PORT, 3100),
 
   // Turso DB (almacenamiento de prompts)
   TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL ?? "",

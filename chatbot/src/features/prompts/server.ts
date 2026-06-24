@@ -113,6 +113,11 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
     }
   });
 
+  // Redirigir raíz al panel de administración
+  app.get("/", (_req, res) => {
+    res.redirect("/admin");
+  });
+
   // Panel de administracion HTML (editor de prompt)
   app.get("/admin", (_req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -171,6 +176,14 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
 <body>
   <h1>Coco Chatbot</h1>
   <p class="subtitle">Editor de Prompt del asistente</p>
+
+  <div class="card" style="margin-bottom: 1.5rem;">
+    <h2>Estado de WhatsApp</h2>
+    <p class="hint" id="wsHint">Conectando...</p>
+    <div id="qrWrap" style="display:flex;justify-content:center;align-items:center;min-height:200px;">
+      <span style="color:#888;font-size:0.9rem;">Esperando estado...</span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>Prompt Base del Chatbot</h2>
@@ -303,7 +316,53 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
     document.getElementById('testInput').addEventListener('keydown', function(e) {
       if (e.key === 'Enter') sendTest();
     });
+
+    // ── Estado de WhatsApp (SSE) ────────────────────────────────
+    const qrWrap = document.getElementById('qrWrap');
+    const wsHint = document.getElementById('wsHint');
+
+    function setStatus(text, color) {
+      wsHint.textContent = text;
+      wsHint.style.color = color || '#666';
+    }
+
+    async function renderQr(text) {
+      qrWrap.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      qrWrap.appendChild(canvas);
+      try {
+        await QRCode.toCanvas(canvas, text, { width: 220, margin: 2 });
+      } catch (e) {
+        qrWrap.innerHTML = '<span class="msg err">Error generando QR</span>';
+      }
+    }
+
+    const es = new EventSource('/api/status/events');
+    es.onmessage = (event) => {
+      try {
+        const state = JSON.parse(event.data);
+        if (state.status === 'connected') {
+          setStatus('Conectado a WhatsApp', '#198754');
+          qrWrap.innerHTML = '<span style="color:#198754;font-weight:500;">WhatsApp conectado</span>';
+        } else if (state.status === 'waiting_qr' && state.qrRaw) {
+          setStatus('Escanea el QR con WhatsApp', '#d97706');
+          renderQr(state.qrRaw);
+        } else if (state.status === 'reconnecting') {
+          setStatus('Reconectando...', '#0d6efd');
+          qrWrap.innerHTML = '<span style="color:#0d6efd;font-weight:500;">Reconectando...</span>';
+        } else {
+          setStatus('Iniciando...', '#666');
+          qrWrap.innerHTML = '<span style="color:#888;">Iniciando sesión...</span>';
+        }
+      } catch (e) {
+        setStatus('Error recibiendo estado', '#dc3545');
+      }
+    };
+    es.onerror = () => {
+      setStatus('Sin conexión con el servidor', '#dc3545');
+    };
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 </body>
 </html>`;
 
