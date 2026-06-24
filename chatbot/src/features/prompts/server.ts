@@ -209,6 +209,7 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <script>
     const base = '/api/prompts';
 
@@ -362,7 +363,6 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
       setStatus('Sin conexión con el servidor', '#dc3545');
     };
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 </body>
 </html>`;
 
