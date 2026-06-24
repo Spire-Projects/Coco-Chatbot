@@ -333,7 +333,7 @@ const buildAdminHtml = (): string => `<!DOCTYPE html>
       try {
         await QRCode.toCanvas(canvas, text, { width: 220, margin: 2 });
       } catch (e) {
-        qrWrap.innerHTML = '<span class="msg err">Error generando QR</span>';
+        qrWrap.innerHTML = '<span class="msg err">Error generando QR ' + e + '</span>';
       }
     }
 
