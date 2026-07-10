@@ -7,6 +7,37 @@ import type { CatalogItem, ConversationMemory, SalesIntent } from "./types.js";
 const modelNotConfiguredMessage =
   "Hola! Puedo ayudarte con informacion de empresas, pero la IA aun no esta configurada. Contacta al administrador.";
 
+const getHourInBolivia = (): number => {
+  try {
+    return Number(
+      new Intl.DateTimeFormat("en-GB", {
+        timeZone: env.TIMEZONE,
+        hour: "numeric",
+        hour12: false,
+      }).format(new Date())
+    );
+  } catch {
+    return new Date().getHours();
+  }
+};
+
+const buildGreetingFallback = (memory: ConversationMemory): string => {
+  const hour = getHourInBolivia();
+  let saludo: string;
+  if (hour >= 5 && hour < 12) saludo = "¡Buenos días";
+  else if (hour >= 12 && hour < 19) saludo = "¡Buenas tardes";
+  else saludo = "¡Buenas noches";
+
+  if (memory.turns.length > 0) {
+    return `${saludo} de nuevo! 👋 ¿En qué más puedo ayudarte?`;
+  }
+  return `${saludo}! 🥥 Soy *CoCo*, tu guía en el Directorio Comercial de Bolivia. ¿Qué tipo de empresa o servicio estás buscando?`;
+};
+
+const buildFarewellFallback = (): string => {
+  return "¡Fue un gusto ayudarte! 🥥 Hasta la próxima. ¡Que tengas un excelente día! 👋";
+};
+
 /**
  * Respuesta de fallback cuando Gemini no está disponible (403/503/agotado).
  * Devuelve directamente los resultados del directorio sin IA.
@@ -15,8 +46,18 @@ const buildFallbackReply = (input: {
   relevantItems: CatalogItem[];
   matchingCount: number;
   memory: ConversationMemory;
+  intent: SalesIntent;
 }): string => {
-  const { relevantItems, matchingCount, memory } = input;
+  const { relevantItems, matchingCount, memory, intent } = input;
+
+  if (intent === "greeting") {
+    return buildGreetingFallback(memory);
+  }
+
+  if (intent === "farewell") {
+    return buildFarewellFallback();
+  }
+
   const rubro = memory.lastRubro || "ese rubro";
   const ciudad = memory.lastUbicacion || "";
 
@@ -29,32 +70,34 @@ const buildFallbackReply = (input: {
     ? `🔍 Aquí tienes empresas de *${rubro}* en *${ciudad.charAt(0).toUpperCase() + ciudad.slice(1)}*:`
     : `🔍 Aquí tienes empresas de *${rubro}*:`;
 
+  const offset = memory.lastResultOffset || 0;
+
+  // Si no hay items en esta pagina pero hay resultados totales, ya se mostro todo
+  if (relevantItems.length === 0 && matchingCount > 0) {
+    return `✅ Ya te mostré las *${matchingCount} empresas* de *${rubro}*${ciudad ? ` en *${ciudad.charAt(0).toUpperCase() + ciudad.slice(1)}*` : ""} disponibles en el directorio.\n\n¿Quieres buscar otro rubro o ciudad? 😊`;
+  }
+
   const lista = relevantItems
-    .slice(0, 5)
-    .map((item, i) => `--- Empresa ${i + 1} ---\n${formatCatalogLine(item)}`)
+    .map((item, i) => `--- Empresa ${offset + i + 1} ---\n${formatCatalogLine(item)}`)
     .join("\n\n");
 
-  const extra = matchingCount > 5
-    ? `\n\n🔎 ¡Y hay *${matchingCount - 5} empresas más*! Dime si quieres ver más resultados.`
-    : "";
+  const shownTotal = offset + relevantItems.length;
+  const remaining = matchingCount - shownTotal;
+  let extra = "";
+  if (remaining > 0) {
+    extra = `\n\n🔎 ¡Y hay *${remaining} empresas más*! Dime si quieres ver más resultados.`;
+  } else if (relevantItems.length > 0) {
+    extra = `\n\n✅ *Se mostraron ${shownTotal} de ${matchingCount} empresas* en total. Es toda la información disponible.`;
+  }
 
   return `${header}\n\n${lista}${extra}`;
 };
 
 const formatCatalogLine = (item: CatalogItem): string => {
-  const ubicacion  = [item.departamento, item.municipio].filter(Boolean).join(", ");
-  const actExtras  = item.actividades.slice(1).filter(Boolean);
   const lines: string[] = [];
-
-  lines.push(`🏢 *${item.nombre}*${item.tipoEmpresa ? `  _(${item.tipoEmpresa})_` : ""}`);
-  if (ubicacion)               lines.push(`📍 ${ubicacion}`);
-  if (item.actividadPrincipal) lines.push(`🔧 ${item.actividadPrincipal}`);
-  if (actExtras.length > 0)    lines.push(`• ${actExtras.join(" · ")}`);
+  lines.push(`🏢 *${item.nombre}*`);
   if (item.direccion)          lines.push(`🏠 ${item.direccion}`);
   if (item.telefono)           lines.push(`📞 ${item.telefono}`);
-  if (item.email)              lines.push(`📧 ${item.email}`);
-  if (item.gerente)            lines.push(`👤 ${item.gerente}`);
-
   return lines.join("\n");
 };
 
@@ -111,6 +154,15 @@ export const generateReply = async (input: {
   matchingCount: number;
 }): Promise<string> => {
   if (!env.GEMINI_API_KEY) {
+    // Aun sin IA configurada, saluda y despide correctamente
+    if (input.intent === "greeting" || input.intent === "farewell") {
+      return buildFallbackReply({
+        relevantItems: input.relevantItems,
+        matchingCount: input.matchingCount,
+        memory: input.memory,
+        intent: input.intent,
+      });
+    }
     return modelNotConfiguredMessage;
   }
 
@@ -130,7 +182,13 @@ export const generateReply = async (input: {
     "Usa siempre la informacion del directorio entregado para responder.",
     "Si no encuentras coincidencias exactas, sugiere opciones similares del directorio.",
     "Nunca inventes informacion que no este en el directorio.",
-    isFirstMessage
+    input.intent === "greeting"
+      ? "INTENCION DEL USUARIO: SALUDO. Responde con un saludo calido segun la hora del dia. Si es el primer mensaje, preséntate brevemente como CoCo 🥥 y pregunta que rubro busca. Si ya hay historial, saluda brevemente y pregunta como puedes seguir ayudando."
+      : input.intent === "farewell"
+      ? "INTENCION DEL USUARIO: DESPEDIDA. Responde con una despedida amable y breve. Deséale un buen dia/tarde/noche segun la hora. No ofrezcas mas informacion ni busques empresas."
+      : input.intent === "more_results"
+      ? "INTENCION DEL USUARIO: PIDE MAS RESULTADOS. El usuario quiere ver mas empresas del MISMO rubro y ubicacion anteriores. No cambies el rubro ni la ciudad. Muestra las siguientes empresas disponibles."
+      : isFirstMessage
       ? "Es el PRIMER mensaje de esta conversacion: preséntate brevemente como CoCo 🥥."
       : "NO es el primer mensaje: PROHIBIDO saludar con '¡Hola!' ni presentarte de nuevo. Responde directamente con emojis naturales.",
   ].join(" ");
@@ -176,6 +234,7 @@ export const generateReply = async (input: {
         relevantItems: input.relevantItems,
         matchingCount: input.matchingCount,
         memory: input.memory,
+        intent: input.intent,
       });
     }
   }
@@ -186,5 +245,6 @@ export const generateReply = async (input: {
     relevantItems: input.relevantItems,
     matchingCount: input.matchingCount,
     memory: input.memory,
+    intent: input.intent,
   });
 };

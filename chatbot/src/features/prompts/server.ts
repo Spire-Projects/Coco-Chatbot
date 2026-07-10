@@ -11,6 +11,60 @@ import { detectIntent } from "../sales-assistant/intent.js";
 import { addConversationTurnScoped, getConversationMemoryScoped } from "../sales-assistant/memory.js";
 import type { IWhatsAppTransport } from "../../core/whatsapp/transport.js";
 
+// ── Helpers duplicados del handler para que /test simule el flujo real ──
+const BOLIVIA_DEPARTMENTS = [
+  "la paz", "santa cruz", "cochabamba", "oruro", "potosi",
+  "tarija", "beni", "pando", "chuquisaca", "sucre", "trinidad",
+];
+const DEPT_SYNONYMS: Record<string, string> = {
+  "cocha": "cochabamba", "cbba": "cochabamba", "cbba.": "cochabamba",
+  "cochbamba": "cochabamba", "cochambamba": "cochabamba", "cochabamaba": "cochabamba",
+  "scz": "santa cruz", "santacruz": "santa cruz", "sta cruz": "santa cruz",
+  "sta. cruz": "santa cruz", "satna cruz": "santa cruz",
+  "lpz": "la paz", "lapaz": "la paz", "la pz": "la paz",
+  "tasrija": "tarija", "tairja": "tarija",
+  "ouro": "oruro", "potosi": "potosi", "ptosi": "potosi",
+  "benii": "beni", "pandoo": "pando",
+  "chuqui": "chuquisaca", "chiqui": "chuquisaca",
+  "chuquizaca": "chuquisaca", "chuquishaca": "chuquisaca", "sucre": "chuquisaca",
+  "trini": "beni", "trinidad": "beni",
+};
+const STOP_WORDS = new Set([
+  "busco", "quiero", "necesito", "hay", "tiene", "tienen",
+  "en", "de", "del", "la", "el", "los", "las", "un", "una",
+  "para", "por", "con", "que", "como", "donde", "cual", "cuales",
+  "me", "te", "se", "si", "no", "es", "son", "esta", "estan",
+  "dame", "dime", "puedes", "mostrar", "ver", "listar", "lista",
+  "encontrar", "buscar", "empresa", "empresas", "negocio", "negocios",
+  "mas", "todo", "todos", "o", "y", "a", "e", "al",
+  "hola", "buenas", "buenos", "buen", "dias", "tardes", "noches",
+  "noche", "dia", "tarde", "mañana", "manana", "hey", "holi",
+  "gracias", "ok", "okay", "oki", "sip", "claro", "perfecto",
+  "ayuda", "ayudame", "informacion", "info",
+  "mi", "mis", "tu", "sus", "su", "nuestro",
+  "quieres", "quisiera", "podrias", "podria",
+  "favor", "porfavor", "por",
+]);
+const normalizeSimple = (text: string): string =>
+  text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+const detectDepartment = (text: string): string | null => {
+  const normalized = normalizeSimple(text);
+  const direct = BOLIVIA_DEPARTMENTS.find((dept) => normalized.includes(dept));
+  if (direct) return direct;
+  const tokens = normalized.split(/\s+/);
+  for (const token of tokens) if (DEPT_SYNONYMS[token]) return DEPT_SYNONYMS[token];
+  for (const [key, value] of Object.entries(DEPT_SYNONYMS)) if (normalized.includes(key)) return value;
+  return null;
+};
+const extractRubroTerms = (text: string, excludeWords: string[]): string[] => {
+  const normalized = normalizeSimple(text);
+  const excluded = new Set(excludeWords.map(normalizeSimple));
+  return normalized
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w) && !BOLIVIA_DEPARTMENTS.some((d) => d.includes(w) || w.includes(d.split(" ")[0])) && !excluded.has(w))
+    .slice(0, 6);
+};
+
 export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
   const app = express();
 
@@ -85,19 +139,80 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
 
       const intent = detectIntent(text);
       const memory = getConversationMemoryScoped("main", from);
-      // Extraer términos del mensaje de prueba para búsqueda contextual
-      const words = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/\s+/).filter((w) => w.length >= 3);
-      const [relevantItems, totalCatalogItems] = await Promise.all([
-        searchCatalog(words, [], 15),
-        getTotalCount(),
-      ]);
+
+      // ── Replicar lógica real de detección de contexto ──
+      const detectedDept = detectDepartment(text);
+      if (detectedDept) {
+        memory.lastUbicacion = detectedDept;
+      }
+
+      const rubroFromText = extractRubroTerms(text, detectedDept ? [detectedDept] : []);
+      const isMoreResults = intent === "more_results";
+
+      // NO sobreescribir rubro cuando pide mas resultados
+      if (rubroFromText.length > 0 && !isMoreResults) {
+        memory.lastRubro = rubroFromText.join(" ");
+      }
+
+      const wordCount = text.trim().split(/\s+/).length;
+      const hasOnlyStopWords = text
+        .toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, " ").trim()
+        .split(/\s+/).every((w) => w.length < 3 || STOP_WORDS.has(w));
+      if (!detectedDept && wordCount <= 3 && !text.includes("?") && rubroFromText.length === 0 && !hasOnlyStopWords && !isMoreResults) {
+        memory.lastRubro = text.trim();
+      }
+
+      const locationTerms = memory.lastUbicacion ? [memory.lastUbicacion] : [];
+
+      let rubroTerms: string[] = [];
+      if (isMoreResults) {
+        rubroTerms = memory.lastRubro
+          ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+          : [];
+      } else {
+        const rubroFromMemory = memory.lastRubro
+          ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+          : [];
+        rubroTerms = [...new Set([...rubroFromMemory, ...rubroFromText])].slice(0, 6);
+      }
+
+      // Solo buscar en catálogo si el intent requiere datos (no para saludos/despedidas)
+      let relevantItems: import("../sales-assistant/types.js").CatalogItem[] = [];
+      let totalCatalogItems = 0;
+      const isSocial = intent === "greeting" || intent === "farewell";
+
+      if (!isSocial) {
+        try {
+          const searchLimit = intent === "more_results" ? 30 : 15;
+          [relevantItems, totalCatalogItems] = await Promise.all([
+            searchCatalog(rubroTerms, locationTerms, searchLimit),
+            getTotalCount(),
+          ]);
+        } catch (catalogErr) {
+          logger.warn({ error: catalogErr instanceof Error ? catalogErr.message : String(catalogErr) }, "Catalogo no disponible en /test");
+          // Continuar sin datos de catálogo; generateReply usará fallbacks
+        }
+      } else {
+        try {
+          totalCatalogItems = await getTotalCount();
+        } catch {
+          totalCatalogItems = 0;
+        }
+      }
+
+      // Paginación para /test
+      if (isMoreResults) {
+        memory.lastResultOffset += 5;
+      }
+      const offset = memory.lastResultOffset || 0;
+      const displayItems = relevantItems.slice(offset, offset + 5);
 
       const reply = await generateReply({
         userMessage: text,
         intent,
         memory,
         sessionName: "main",
-        relevantItems,
+        relevantItems: displayItems,
         totalCatalogItems,
         matchingCount: relevantItems.length,
       });
@@ -105,7 +220,7 @@ export const startPromptApiServer = (transport: IWhatsAppTransport): Server => {
       addConversationTurnScoped("main", from, { role: "user", text, at: Date.now() }, intent, []);
       addConversationTurnScoped("main", from, { role: "assistant", text: reply, at: Date.now() }, intent, []);
 
-      res.json({ reply, catalogItems: totalCatalogItems, relevantItems: relevantItems.length, intent });
+      res.json({ reply, catalogItems: totalCatalogItems, relevantItems: relevantItems.length, intent, rubroTerms, locationTerms });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ error: message }, "Error en /test");

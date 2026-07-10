@@ -41,6 +41,7 @@ const getConversationMemoryByKey = (key: string): ConversationMemory => {
     lastIntent: "query",
     lastRubro: "",
     lastUbicacion: "",
+    lastResultOffset: 0,
   };
 
   store.set(key, created);

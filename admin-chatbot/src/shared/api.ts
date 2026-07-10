@@ -1,8 +1,9 @@
 import type { ChatsPage, ConnectionState, MessagesPage, PromptState } from "../features/sessions/types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
+const envUrl = import.meta.env.VITE_API_BASE_URL as string | undefined;
+const API_BASE_URL = envUrl || "";
 if (!API_BASE_URL) {
-  throw new Error("VITE_API_BASE_URL no está definida. Agrega la variable de entorno antes de compilar.");
+  console.warn("VITE_API_BASE_URL no está definida. Usando same-origin (/api). Agrega la variable de entorno si el backend está en otro dominio.");
 }
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {

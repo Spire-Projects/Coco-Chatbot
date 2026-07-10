@@ -1,4 +1,4 @@
-export type SalesIntent = "query" | "comparison";
+export type SalesIntent = "query" | "comparison" | "greeting" | "farewell" | "more_results";
 
 /**
  * Empresa del directorio. Cada campo corresponde a una columna del Google Sheets:
@@ -38,4 +38,6 @@ export interface ConversationMemory {
   lastRubro: string;
   /** Última ubicación (departamento/ciudad) mencionada — persiste entre turnos */
   lastUbicacion: string;
+  /** Índice del último resultado mostrado para paginación con "más resultados" */
+  lastResultOffset: number;
 }

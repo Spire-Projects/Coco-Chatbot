@@ -92,6 +92,10 @@ const STOP_WORDS = new Set([
   "mi", "mis", "tu", "sus", "su", "nuestro",
   "quieres", "quiero", "quisiera", "podrias", "podria",
   "favor", "porfavor", "por",
+  // Palabras de navegacion que no son rubros
+  "resultados", "opciones", "siguiente", "siguientes", "anterior", "anteriores",
+  "empresa", "empresas", "negocio", "negocios", "mostrar", "ver", "lista",
+  "continuar", "seguir", "enviar", "pasar", "dime", "dame", "muestra",
 ]);
 
 const normalizeSimple = (text: string): string =>
@@ -169,42 +173,93 @@ const processMessage = async (
   // Extraer rubro del mensaje actual (independientemente de la longitud)
   const rubroFromText = extractRubroTerms(incomingText, detectedDept ? [detectedDept] : []);
 
-  // Guardar rubro detectado en memoria para turnos futuros
-  if (rubroFromText.length > 0 && !detectedDept) {
+  // Guardar rubro detectado en memoria para turnos futuros (siempre que haya rubro extraído)
+  // PERO: si el usuario pide "mas resultados", NO sobreescribir el rubro anterior
+  const isMoreResults = intent === "more_results";
+  if (rubroFromText.length > 0 && !isMoreResults) {
     memory.lastRubro = rubroFromText.join(" ");
-  } else if (rubroFromText.length > 0 && !memory.lastRubro) {
-    // Mensaje mixto (rubro + ubicación): guardar la parte del rubro
-    memory.lastRubro = rubroFromText.join(" ");
+    // Nueva búsqueda con rubro nuevo: resetear paginación
+    memory.lastResultOffset = 0;
   }
 
-  // Si el mensaje es corto (<=3 palabras) y sin dept ni stop words, probablemente es solo rubro
+  // Si el mensaje es corto (<=3 palabras), sin dept, sin signo de pregunta,
+  // y no se extrajo rubro porque son palabras muy cortas, asumir que todo el mensaje es el rubro
+  // PERO solo si el mensaje no es puramente saludos/stop words.
   const wordCount = incomingText.trim().split(/\s+/).length;
-  if (!detectedDept && wordCount <= 3 && !incomingText.includes("?") && rubroFromText.length === 0) {
+  const hasOnlyStopWords = incomingText
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .every((w) => w.length < 3 || STOP_WORDS.has(w));
+
+  if (!detectedDept && wordCount <= 3 && !incomingText.includes("?") && rubroFromText.length === 0 && !hasOnlyStopWords && !isMoreResults) {
     memory.lastRubro = incomingText.trim();
   }
 
   // ── Construir términos de búsqueda ──────────────────────────────────────
   const locationTerms = memory.lastUbicacion ? [memory.lastUbicacion] : [];
 
-  const rubroFromMemory = memory.lastRubro
-    ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
-    : [];
-  const rubroTerms = [...new Set([...rubroFromMemory, ...rubroFromText])].slice(0, 6);
+  let rubroTerms: string[] = [];
+  if (intent === "more_results") {
+    // Para "mas resultados", usar EXCLUSIVAMENTE el rubro guardado en memoria
+    // (ignorar cualquier palabra del mensaje actual que pudiera parecer rubro)
+    rubroTerms = memory.lastRubro
+      ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+      : [];
+  } else {
+    const rubroFromMemory = memory.lastRubro
+      ? normalizeSimple(memory.lastRubro).split(/\s+/).filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+      : [];
+    rubroTerms = [...new Set([...rubroFromMemory, ...rubroFromText])].slice(0, 6);
+  }
 
   logger.info({ from, phone, intent, rubroTerms, locationTerms }, "Procesando mensaje");
 
+  const isSocialIntent = intent === "greeting" || intent === "farewell";
+
   try {
-    const [relevantItems, totalCatalogItems] = await Promise.all([
-      searchCatalog(rubroTerms, locationTerms, 15),
-      getTotalCount(),
-    ]);
+    let relevantItems: import("./types.js").CatalogItem[] = [];
+    let totalCatalogItems = 0;
+
+    if (!isSocialIntent) {
+      try {
+        // Para "mas resultados", ampliar el limite para traer mas empresas del mismo rubro/ciudad
+        const searchLimit = intent === "more_results" ? 30 : 15;
+        [relevantItems, totalCatalogItems] = await Promise.all([
+          searchCatalog(rubroTerms, locationTerms, searchLimit),
+          getTotalCount(),
+        ]);
+      } catch (catalogErr) {
+        logger.error({ error: catalogErr instanceof Error ? catalogErr.message : String(catalogErr), rubroTerms, locationTerms }, "Fallo al consultar el directorio");
+        await transport.sendTextMessage(from, "😕 En este momento no puedo acceder al directorio de empresas. Verifica que la hoja de cálculo esté pública o intenta de nuevo en unos segundos. 🙏");
+        return;
+      }
+    } else {
+      try {
+        totalCatalogItems = await getTotalCount();
+      } catch {
+        totalCatalogItems = 0;
+      }
+    }
+
+    // Paginación: cuando pide "mas resultados", avanzar offset para mostrar las siguientes
+    if (isMoreResults) {
+      memory.lastResultOffset += 5;
+    }
+
+    // Solo enviamos a Gemini/fallback las empresas de la pagina actual
+    const offset = memory.lastResultOffset || 0;
+    const displayItems = relevantItems.slice(offset, offset + 5);
 
     const reply = await generateReply({
       userMessage: incomingText,
       intent,
       memory,
       sessionName: MAIN_SESSION,
-      relevantItems,
+      relevantItems: displayItems,
       totalCatalogItems,
       matchingCount: relevantItems.length,
     });
