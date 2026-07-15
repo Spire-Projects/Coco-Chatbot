@@ -38,7 +38,12 @@ const moreResultsKeywords = [
   "siguiente pagina", "siguiente página"
 ];
 
-const isShortMessage = (msg: string): boolean => msg.trim().split(/\s+/).length <= 6;
+/**
+ * Un mensaje se considera "corto" (candidato a saludo/despedida) si tiene
+ * como máximo 3 palabras. Esto evita que "hola busco ferreterias en santa
+ * cruz" (6 palabras) se clasifique como greeting.
+ */
+const isShortMessage = (msg: string): boolean => msg.trim().split(/\s+/).length <= 3;
 
 /**
  * Sufijos/indicadores de que el usuario está pidiendo una empresa PUNTUAL

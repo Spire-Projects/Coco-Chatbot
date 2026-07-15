@@ -144,9 +144,26 @@ const buildGvizQuery = (
 };
 
 /**
+ * Sufijos de razón social que se quitan del nombre antes de buscar, porque
+ * su formato varía (S.R.L. vs SRL vs S.R.L) y rompe la coincidencia con
+ * `contains` de gviz (que no normaliza puntos).
+ */
+const LEGAL_SUFFIXES = [
+  "s r l", "s a s", "s a", "srl", "sas", "sa",
+  "limitada", "ltda", "unipersonal"
+];
+
+/**
  * Construye una query TQ para buscar por NOMBRE EXACTO de empresa.
  * A diferencia de buildGvizQuery, aquí buscamos coincidencia del nombre
- * completo en la columna C (Nombre), tolerante a tildes y mayúsculas.
+ * en la columna C (Nombre), tolerante a tildes y mayúsculas.
+ *
+ * IMPORTANTE: se quita la razón social (S.R.L., S.A., Ltda.) del término
+ * de búsqueda porque `normalizeText` convierte los puntos en espacios
+ * ("s.r.l" → "s r l"), lo que NO coincide con el valor de la celda que
+ * mantiene los puntos ("S.R.L."). Buscar solo el nombre base ("santa fe
+ * viajes") es más robusto y evita este problema.
+ *
  * Devuelve null si no hay un nombre válido.
  */
 const buildGvizNameQuery = (
@@ -154,13 +171,28 @@ const buildGvizNameQuery = (
   locationTerms: string[],
   limit: number
 ): string | null => {
-  const safeName = sanitizeTerm(normalizeText(name)).trim();
+  // Normalizar y quitar razón social del final
+  let normalized = normalizeText(name).trim();
+  for (const suffix of LEGAL_SUFFIXES) {
+    // Quitar el sufijo si aparece al final del nombre normalizado
+    const re = new RegExp(`\\s${suffix}$`, "i");
+    normalized = normalized.replace(re, " ").trim();
+  }
+  // Limpiar espacios múltiples y sanitizar
+  const safeName = sanitizeTerm(normalized).replace(/\s+/g, " ").trim();
   if (safeName.length < 3) return null;
 
-  // Coincidencia por nombre: usamos el stem del nombre completo para tolerar
-  // tildes y variaciones menores. Buscamos SOLO en la columna C (Nombre).
-  const nameStem = makeStem(safeName);
-  const conditions: string[] = [`lower(C) contains '${nameStem}'`];
+  // Dividir el nombre en tokens significativos (>=2 chars) y buscar que
+  // TODOS estén presentes en la columna C. Usamos >=2 (no >=3) para no
+  // perder palabras cortas importantes como "fe" en "Santa Fe".
+  const tokens = safeName.split(" ").filter((t) => t.length >= 2);
+  if (tokens.length === 0) return null;
+
+  // Usar el primer token como condición base (siempre debe estar)
+  // y los demás como condiciones AND adicionales para precisión.
+  const nameConditions = tokens.map((tok) => `lower(C) contains '${tok}'`);
+
+  const conditions: string[] = [...nameConditions];
 
   if (locationTerms.length > 0) {
     const locCols = ["A", "B"];
@@ -460,6 +492,9 @@ const filterCsvItems = (
  * Filtro por nombre exacto para modo CSV local.
  * Solo compara contra el campo `nombre` (no actividades), para evitar
  * mezclar empresas del mismo rubro que no son la buscada.
+ *
+ * Quita la razón social (S.R.L., S.A., Ltda.) antes de comparar, para
+ * tolerar variaciones de formato en el sufijo legal.
  */
 const filterCsvItemsByName = (
   items: CatalogItem[],
@@ -467,17 +502,24 @@ const filterCsvItemsByName = (
   locationTerms: string[],
   limit: number
 ): CatalogItem[] => {
-  const nameNorm = normalizeText(name);
+  // Normalizar y quitar razón social del final
+  let nameNorm = normalizeText(name).trim();
+  for (const suffix of LEGAL_SUFFIXES) {
+    const re = new RegExp(`\\s${suffix}$`, "i");
+    nameNorm = nameNorm.replace(re, " ").trim();
+  }
   if (nameNorm.length < 3) return [];
   const locNorm = locationTerms.map(normalizeText);
 
-  // Primero intento: coincidencia exacta (normalizada) del nombre completo
-  let matches = items.filter((item) => normalizeText(item.nombre) === nameNorm);
+  // Tokens significativos del nombre (>=2 chars para no perder "fe", "la", etc.)
+  const tokens = nameNorm.split(" ").filter((t) => t.length >= 2);
+  if (tokens.length === 0) return [];
 
-  // Si no hay exacta, buscamos por inclusión del nombre en el campo nombre
-  if (matches.length === 0) {
-    matches = items.filter((item) => normalizeText(item.nombre).includes(nameNorm));
-  }
+  // Coincidencia: TODOS los tokens deben estar en el nombre de la empresa
+  let matches = items.filter((item) => {
+    const itemNorm = normalizeText(item.nombre);
+    return tokens.every((tok) => itemNorm.includes(tok));
+  });
 
   // Filtro de ubicación si fue proporcionada
   if (locNorm.length > 0) {
