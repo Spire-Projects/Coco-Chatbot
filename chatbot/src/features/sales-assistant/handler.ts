@@ -224,39 +224,34 @@ const processMessage = async (
   const isSocialIntent = intent === "greeting" || intent === "farewell";
 
   try {
-    let relevantItems: import("./types.js").CatalogItem[] = [];
-    let totalCatalogItems = 0;
-
-    if (!isSocialIntent) {
-      try {
-        // Para "mas resultados", ampliar el limite para traer mas empresas del mismo rubro/ciudad
-        const searchLimit = intent === "more_results" ? 30 : 15;
-        [relevantItems, totalCatalogItems] = await Promise.all([
-          searchCatalog(rubroTerms, locationTerms, searchLimit),
-          getTotalCount(),
-        ]);
-      } catch (catalogErr) {
-        logger.error({ error: catalogErr instanceof Error ? catalogErr.message : String(catalogErr), rubroTerms, locationTerms }, "Fallo al consultar el directorio");
-        await transport.sendTextMessage(from, "😕 En este momento no puedo acceder al directorio de empresas. Verifica que la hoja de cálculo esté pública o intenta de nuevo en unos segundos. 🙏");
-        return;
-      }
-    } else {
+    // ── Saludo / Despedida: no consultar directorio ────────────────────
+    if (isSocialIntent) {
+      let totalCatalogItems = 0;
       try {
         totalCatalogItems = await getTotalCount();
       } catch {
         totalCatalogItems = 0;
       }
+
+      const reply = await generateReply({
+        userMessage: incomingText,
+        intent,
+        memory,
+        sessionName: MAIN_SESSION,
+        relevantItems: [],
+        totalCatalogItems,
+        matchingCount: 0,
+      });
+
+      await sleep(calculateDelay(reply.length));
+      await transport.sendTextMessage(from, reply);
+
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+      void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+      return;
     }
 
-    // Paginación: cuando pide "mas resultados", avanzar offset para mostrar las siguientes
-    if (isMoreResults) {
-      memory.lastResultOffset += 5;
-    }
-
-    // Solo enviamos a Gemini/fallback las empresas de la pagina actual
-    const offset = memory.lastResultOffset || 0;
-    const displayItems = relevantItems.slice(offset, offset + 5);
-  try {
     // ── Búsqueda por NOMBRE EXACTO ──────────────────────────────────────
     // Si el usuario pide una empresa puntual por su nombre, NO mezclamos con
     // resultados del mismo rubro: buscamos solo por nombre en la columna C.
@@ -288,7 +283,6 @@ const processMessage = async (
 
       addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
       addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
-
       void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
       return;
     }
@@ -313,7 +307,7 @@ const processMessage = async (
       }
 
       // Avanzar el offset una página completa
-      const nextOffset = memory.lastOffset + PAGE_SIZE;
+      const nextOffset = memory.lastResultOffset + PAGE_SIZE;
       const remaining = memory.lastMatchingCount - nextOffset;
 
       // Si ya no quedan resultados por mostrar
@@ -335,7 +329,7 @@ const processMessage = async (
       ]);
 
       // Actualizar el offset en memoria para la próxima paginación
-      memory.lastOffset = nextOffset;
+      memory.lastResultOffset = nextOffset;
 
       const reply = await generateReply({
         userMessage: incomingText,
@@ -370,7 +364,7 @@ const processMessage = async (
     // Guardar estado de paginación para futuros "ver más"
     memory.lastRubroTerms = rubroTerms;
     memory.lastLocationTerms = locationTerms;
-    memory.lastOffset = 0;
+    memory.lastResultOffset = 0;
     memory.lastMatchingCount = totalMatching;
 
     const reply = await generateReply({
@@ -378,7 +372,7 @@ const processMessage = async (
       intent,
       memory,
       sessionName: MAIN_SESSION,
-      relevantItems: displayItems,
+      relevantItems,
       totalCatalogItems,
       matchingCount: totalMatching,
     });
