@@ -143,6 +143,55 @@ const main = async () => {
   assert(detectIntent("buenas tardes") === "greeting", `"buenas tardes" → greeting`);
   assert(detectIntent("gracias chau") === "farewell", `"gracias chau" → farewell`);
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // SECCIÓN 1b: Detección de fuera de contexto (out_of_scope)
+  // ════════════════════════════════════════════════════════════════════════════
+  seccion("1b. Detección de fuera de contexto (out_of_scope)");
+
+  // Deportes
+  assert(
+    detectIntent("croacia le gano a espana") === "out_of_scope",
+    `"croacia le gano a espana" → out_of_scope (deportes)`
+  );
+  assert(
+    detectIntent("En hokey") === "out_of_scope",
+    `"En hokey" → out_of_scope (deportes)`
+  );
+
+  // Conversacional / meta-conversación
+  assert(
+    detectIntent("COmo asi eres un buscador simple??") === "out_of_scope",
+    `"COmo asi eres un buscador simple??" → out_of_scope (meta-conversación)`
+  );
+  assert(
+    detectIntent("sabias") === "out_of_scope",
+    `"sabias" → out_of_scope (conversacional)`
+  );
+  assert(
+    detectIntent("prro") === "out_of_scope",
+    `"prro" → out_of_scope (jerga)`
+  );
+
+  // Pregunta sobre ubicación personal del bot
+  assert(
+    detectIntent("Y por ubicacion no tienes vivo en la zona norte") === "out_of_scope",
+    `"Y por ubicacion no tienes vivo en la zona norte" → out_of_scope (conversacional)`
+  );
+
+  // Búsquedas legítimas NO deben ser out_of_scope
+  assert(
+    detectIntent("necesito una ferreteria en Tarija") !== "out_of_scope",
+    `"necesito una ferreteria en Tarija" NO → out_of_scope (búsqueda legítima)`
+  );
+  assert(
+    detectIntent("busco una farmacia en La Paz") !== "out_of_scope",
+    `"busco una farmacia en La Paz" NO → out_of_scope (búsqueda legítima)`
+  );
+  assert(
+    detectIntent("Santa Fe Viajes S.R.L. en Santa Cruz") !== "out_of_scope",
+    `"Santa Fe Viajes S.R.L. en Santa Cruz" NO → out_of_scope (búsqueda por nombre)`
+  );
+
   // "hola busco ferreterias" NO debe ser greeting (mensaje largo con rubro)
   assert(
     detectIntent("hola busco ferreterias en santa cruz") !== "greeting",

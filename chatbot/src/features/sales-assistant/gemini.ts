@@ -39,6 +39,19 @@ const buildFarewellFallback = (): string => {
 };
 
 /**
+ * Respuesta de fallback para mensajes fuera de contexto (deportes, política,
+ * charla casual, etc.). El bot rechaza amablemente y redirige a su función.
+ */
+const buildOutOfScopeFallback = (): string => {
+  return [
+    "😄 Jaja, eso está fuera de mi zona. ",
+    "Soy CoCo 🥥, tu guía del Directorio Comercial de Bolivia. ",
+    "Puedo ayudarte a encontrar empresas, negocios y servicios en cualquier departamento de Bolivia. ",
+    "¿Qué tipo de empresa o servicio estás buscando? 😊"
+  ].join("");
+};
+
+/**
  * Respuesta de fallback cuando Gemini no está disponible (403/503/agotado).
  * Devuelve directamente los resultados del directorio sin IA.
  */
@@ -60,6 +73,10 @@ const buildFallbackReply = (input: {
 
   if (intent === "farewell") {
     return buildFarewellFallback();
+  }
+
+  if (intent === "out_of_scope") {
+    return buildOutOfScopeFallback();
   }
 
   const rubro = memory.lastRubro || "ese rubro";
@@ -196,8 +213,8 @@ export const generateReply = async (input: {
   pageOffset?: number;
 }): Promise<string> => {
   if (!env.GEMINI_API_KEY) {
-    // Aun sin IA configurada, saluda y despide correctamente
-    if (input.intent === "greeting" || input.intent === "farewell") {
+    // Aun sin IA configurada, saluda, despide y rechaza fuera de contexto
+    if (input.intent === "greeting" || input.intent === "farewell" || input.intent === "out_of_scope") {
       return buildFallbackReply({
         relevantItems: input.relevantItems,
         matchingCount: input.matchingCount,
@@ -228,6 +245,8 @@ export const generateReply = async (input: {
       ? "INTENCION DEL USUARIO: SALUDO. Responde con un saludo calido segun la hora del dia. Si es el primer mensaje, preséntate brevemente como CoCo 🥥 y pregunta que rubro busca. Si ya hay historial, saluda brevemente y pregunta como puedes seguir ayudando."
       : input.intent === "farewell"
       ? "INTENCION DEL USUARIO: DESPEDIDA. Responde con una despedida amable y breve. Deséale un buen dia/tarde/noche segun la hora. No ofrezcas mas informacion ni busques empresas."
+      : input.intent === "out_of_scope"
+      ? "INTENCION DEL USUARIO: FUERA DE CONTEXTO. El usuario preguntó sobre un tema ajeno al directorio de empresas (deportes, política, clima, entretenimiento, o simplemente charla casual). NO busques en el directorio. Responde con humor y calidez, explicando brevemente que solo puedes ayudar a encontrar empresas y servicios en Bolivia, y ofrécete a buscar lo que necesite. Mantén tu personalidad de CoCo 🥥."
       : input.intent === "more_results"
       ? "INTENCION DEL USUARIO: PIDE MAS RESULTADOS. El usuario quiere ver mas empresas del MISMO rubro y ubicacion anteriores. No cambies el rubro ni la ciudad. Muestra las siguientes empresas disponibles."
       : isFirstMessage

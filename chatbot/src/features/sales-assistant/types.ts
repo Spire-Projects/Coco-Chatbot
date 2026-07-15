@@ -4,7 +4,8 @@ export type SalesIntent =
   | "greeting"
   | "farewell"
   | "more_results"
-  | "name_search";
+  | "name_search"
+  | "out_of_scope";
 
 /**
  * Empresa del directorio. Cada campo corresponde a una columna del Google Sheets:

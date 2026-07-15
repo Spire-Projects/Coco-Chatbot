@@ -224,6 +224,27 @@ const processMessage = async (
   const isSocialIntent = intent === "greeting" || intent === "farewell";
 
   try {
+    // ── Fuera de contexto: rechazar amablemente sin buscar ─────────────
+    if (intent === "out_of_scope") {
+      const reply = await generateReply({
+        userMessage: incomingText,
+        intent,
+        memory,
+        sessionName: MAIN_SESSION,
+        relevantItems: [],
+        totalCatalogItems: 0,
+        matchingCount: 0,
+      });
+
+      await sleep(calculateDelay(reply.length));
+      await transport.sendTextMessage(from, reply);
+
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+      void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+      return;
+    }
+
     // ── Saludo / Despedida: no consultar directorio ────────────────────
     if (isSocialIntent) {
       let totalCatalogItems = 0;

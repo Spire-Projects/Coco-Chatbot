@@ -25,6 +25,52 @@ const farewellKeywords = [
   "gracias adios", "gracias chau", "buenas noches", "buena noche"
 ];
 
+/**
+ * Temas que están claramente FUERA del alcance del bot (directorio de empresas).
+ * Si el mensaje menciona alguno de estos temas, se clasifica como out_of_scope
+ * y el bot responde amablemente sin buscar en el directorio.
+ */
+const outOfScopeTopics = [
+  // Deportes
+  "futbol", "baloncesto", "basketbol", "tenis", "beisbol", "voley",
+  "boxeo", "gano", "perdio", "empato", "partido", "copa", "mundial",
+  "libertadores", "champions", "liga", "resultado", "goles", "seleccion",
+  "croacia", "espana", "argentina", "brasil", "alemania", "francia",
+  "hokey", "hockey", "formula", "f1", "nascar", "ufc", "mma",
+  // Política / noticias
+  "elecciones", "presidente", "gobierno", "congreso", "senador", "diputado",
+  "politica", "politico", "voto", "campaña", "candidato", "partido politico",
+  "noticias", "noticia", "periodico", "noticiero",
+  // Clima / ciencia / general
+  "clima", "temperatura", "lluvia", "pronostico", "pronóstico",
+  "receta", "cocinar", "ingredientes",
+  // Entretenimiento
+  "pelicula", "peliculas", "serie", "series", "netflix", "cancion",
+  "musica", "concierto", "videojuego", "juego", "jugar",
+  // Preguntas sobre el bot mismo (meta-conversación)
+  "como asi", "como es que", "eres un buscador", "eres un bot",
+  "eres simple", "que eres", "quien eres tu", "como funcionas",
+  "sabias", "prro", "prrro", "jaja", "jajaja", "lol", "xd",
+  // Otros
+  "horoscopo", "signo", "zodiaco", "amor", "novia", "novio",
+  "chiste", "chistes", "adivinanza", "adivinanzas"
+];
+
+/**
+ * Indicadores de que el mensaje es una pregunta conversacional o comentario
+ * que NO busca empresas (sino que charla con el bot).
+ */
+const conversationalPatterns = [
+  "como asi", "como es que", "o sea", "osea", "me explicas",
+  "que quieres decir", "no entendi", "no entiendo", "que significa",
+  "sabias que", "te gusta", "crees que", "piensas que",
+  "eres un", "eres una", "eres simple", "eres tonto", "eres inteligente",
+  "quien te creo", "quien te hizo", "como funcionas",
+  "no tienes vivo", "tienes vivo", "no vives", "no vives en",
+  "por que no", "porque no", "como que no", "no tienes",
+  "y por que", "y porque", "y por ubicacion", "por ubicacion"
+];
+
 const moreResultsKeywords = [
   "ver mas", "quiero mas", "hay mas", "mostrar mas", "dame mas",
   "otras opciones", "mas opciones", "mas resultados", "mas empresas",
@@ -146,6 +192,22 @@ export const extractCompanyName = (message: string): string => {
   return tokens.join(" ").trim();
 };
 
+/**
+ * Palabras que indican que el usuario SÍ está buscando empresas/servicios.
+ * Si el mensaje contiene alguna de estas, NO se clasifica como out_of_scope.
+ */
+const businessSearchWords = [
+  "empresa", "empresas", "negocio", "negocios", "rubro", "servicio",
+  "servicios", "tienda", "tiendas", "local", "locales", "contacto",
+  "telefono", "direccion", "donde", "busco", "necesito", "quiero",
+  "ferreteria", "farmacia", "restaurante", "hotel", "clinica",
+  "taller", "panaderia", "carniceria", "supermercado", "mercado",
+  "agencia", "despachante", "aduanas", "viajes", "turismo",
+  "transporte", "constructora", "inmobiliaria", "abogado", "dentista",
+  "medico", "veterinario", "peluqueria", "gimnasio", "lavanderia",
+  "imprenta", "carpinteria", "electricista", "plomero", "mecanico"
+];
+
 export const detectIntent = (message: string): SalesIntent => {
   const value = message.toLowerCase();
   const normalized = normalizeForIntent(message);
@@ -176,6 +238,20 @@ export const detectIntent = (message: string): SalesIntent => {
   //    de razón social (S.R.L., S.A., Ltda.) o frases como "empresa llamada X"
   if (companyNameIndicators.some((ind) => normalized.includes(ind))) {
     return "name_search";
+  }
+
+  // 6. Fuera de contexto: el mensaje menciona temas ajenos al directorio
+  //    (deportes, política, clima, etc.) o es conversacional, y NO contiene
+  //    palabras de búsqueda de empresas.
+  const mentionsOutOfScopeTopic =
+    outOfScopeTopics.some((topic) => normalized.includes(topic));
+  const isConversational =
+    conversationalPatterns.some((pat) => normalized.includes(pat));
+  const mentionsBusinessSearch =
+    businessSearchWords.some((word) => normalized.includes(word));
+
+  if ((mentionsOutOfScopeTopic || isConversational) && !mentionsBusinessSearch) {
+    return "out_of_scope";
   }
 
   return "query";
