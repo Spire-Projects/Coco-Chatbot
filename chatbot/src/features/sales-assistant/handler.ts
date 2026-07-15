@@ -1,8 +1,8 @@
 import { logger } from "../../core/logger.js";
 import type { IWhatsAppTransport } from "../../core/whatsapp/transport.js";
-import { searchCatalog, getTotalCount } from "./catalog.js";
+import { searchCatalog, searchCatalogByName, countCatalog, getTotalCount } from "./catalog.js";
 import { generateReply } from "./gemini.js";
-import { detectIntent } from "./intent.js";
+import { detectIntent, extractCompanyName } from "./intent.js";
 import {
   addConversationTurnScoped,
   getConversationMemoryScoped
@@ -153,6 +153,9 @@ const calculateDelay = (textLength: number): number => {
   return Math.round(base + jitter);
 };
 
+/** Tamaño de página para la paginación de resultados por rubro. */
+const PAGE_SIZE = 5;
+
 /** Procesa un bloque de texto (puede ser la combinación de varios mensajes rápidos). */
 const processMessage = async (
   from: string,
@@ -253,6 +256,122 @@ const processMessage = async (
     // Solo enviamos a Gemini/fallback las empresas de la pagina actual
     const offset = memory.lastResultOffset || 0;
     const displayItems = relevantItems.slice(offset, offset + 5);
+  try {
+    // ── Búsqueda por NOMBRE EXACTO ──────────────────────────────────────
+    // Si el usuario pide una empresa puntual por su nombre, NO mezclamos con
+    // resultados del mismo rubro: buscamos solo por nombre en la columna C.
+    if (intent === "name_search") {
+      const companyName = extractCompanyName(incomingText);
+      logger.info({ from, phone, companyName, locationTerms }, "Búsqueda por nombre exacto");
+
+      const [nameItems, totalCatalogItems] = await Promise.all([
+        companyName.length >= 3
+          ? searchCatalogByName(companyName, locationTerms, 10)
+          : Promise.resolve([]),
+        getTotalCount(),
+      ]);
+
+      const reply = await generateReply({
+        userMessage: incomingText,
+        intent,
+        memory,
+        sessionName: MAIN_SESSION,
+        relevantItems: nameItems,
+        totalCatalogItems,
+        matchingCount: nameItems.length,
+        isNameSearch: true,
+        companyName,
+      });
+
+      await sleep(calculateDelay(reply.length));
+      await transport.sendTextMessage(from, reply);
+
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+
+      void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+      return;
+    }
+
+    // ── Paginación: "ver más resultados" ────────────────────────────────
+    // El usuario quiere el siguiente lote de la búsqueda anterior por rubro.
+    // Avanzamos el offset y reutilizamos los términos guardados en memoria.
+    if (intent === "more_results") {
+      const hasPreviousSearch =
+        memory.lastRubroTerms.length > 0 || memory.lastLocationTerms.length > 0;
+
+      if (!hasPreviousSearch) {
+        const reply =
+          "🤔 No tengo una búsqueda anterior para continuar. " +
+          "Dime qué rubro y ciudad buscas y te muestro opciones. 😊";
+        await sleep(calculateDelay(reply.length));
+        await transport.sendTextMessage(from, reply);
+        addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+        addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+        void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+        return;
+      }
+
+      // Avanzar el offset una página completa
+      const nextOffset = memory.lastOffset + PAGE_SIZE;
+      const remaining = memory.lastMatchingCount - nextOffset;
+
+      // Si ya no quedan resultados por mostrar
+      if (remaining <= 0) {
+        const reply =
+          "✅ Eso fue todo, no tengo más empresas para esa búsqueda. " +
+          "Si quieres, dime otro rubro o ciudad y te busco más opciones. 😉";
+        await sleep(calculateDelay(reply.length));
+        await transport.sendTextMessage(from, reply);
+        addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+        addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+        void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+        return;
+      }
+
+      const [pageItems, totalCatalogItems] = await Promise.all([
+        searchCatalog(memory.lastRubroTerms, memory.lastLocationTerms, PAGE_SIZE, nextOffset),
+        getTotalCount(),
+      ]);
+
+      // Actualizar el offset en memoria para la próxima paginación
+      memory.lastOffset = nextOffset;
+
+      const reply = await generateReply({
+        userMessage: incomingText,
+        intent,
+        memory,
+        sessionName: MAIN_SESSION,
+        relevantItems: pageItems,
+        totalCatalogItems,
+        matchingCount: memory.lastMatchingCount,
+        isPagination: true,
+        pageOffset: nextOffset,
+      });
+
+      await sleep(calculateDelay(reply.length));
+      await transport.sendTextMessage(from, reply);
+
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "user", text: incomingText, at: Date.now() }, intent, []);
+      addConversationTurnScoped(MAIN_SESSION, phone, { role: "assistant", text: reply, at: Date.now() }, intent, []);
+      void saveChatTurn({ phone, userMessage: incomingText, botReply: reply, intent });
+      return;
+    }
+
+    // ── Búsqueda normal por rubro ──────────────────────────────────────
+    // Es una búsqueda nueva: reiniciamos el offset y guardamos los términos
+    // para permitir paginación futura con "ver más resultados".
+    const [relevantItems, totalMatching, totalCatalogItems] = await Promise.all([
+      searchCatalog(rubroTerms, locationTerms, PAGE_SIZE, 0),
+      countCatalog(rubroTerms, locationTerms),
+      getTotalCount(),
+    ]);
+
+    // Guardar estado de paginación para futuros "ver más"
+    memory.lastRubroTerms = rubroTerms;
+    memory.lastLocationTerms = locationTerms;
+    memory.lastOffset = 0;
+    memory.lastMatchingCount = totalMatching;
 
     const reply = await generateReply({
       userMessage: incomingText,
@@ -261,7 +380,7 @@ const processMessage = async (
       sessionName: MAIN_SESSION,
       relevantItems: displayItems,
       totalCatalogItems,
-      matchingCount: relevantItems.length,
+      matchingCount: totalMatching,
     });
 
     await sleep(calculateDelay(reply.length));

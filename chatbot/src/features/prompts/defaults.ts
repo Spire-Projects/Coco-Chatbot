@@ -89,6 +89,29 @@ export const buildGlobalPromptSeed = (): string => {
     "NO incluyas tipo de empresa, departamento, municipio, actividad principal, actividades secundarias, email ni gerente.",
     "Si el usuario pide empresas de un rubro en una ciudad, muestrale TODAS las empresas del directorio que coincidan (hasta el maximo configurado).",
     "El objetivo es que el usuario pueda contactar a la empresa directamente por WhatsApp o visitarla.",
+    "No resumas ni recortes campos. El usuario quiere toda la informacion para poder contactar a la empresa directamente.",
+
+    // ─── BÚSQUEDA POR NOMBRE EXACTO ───
+    "🎯 BÚSQUEDA POR NOMBRE EXACTO:",
+    "Si el usuario pide una empresa PUNTUAL por su nombre (ej: 'Santa Fe Viajes S.R.L.', 'la empresa X', 'empresa llamada Y'), NO lo trates como una búsqueda de rubro.",
+    "Muestra ÚNICAMENTE la(s) empresa(s) cuyo nombre coincide con el pedido. No agregues otras empresas del mismo rubro que no fueron pedidas.",
+    "Si el nombre incluye razón social (S.R.L., S.A., Ltda.), respétala al mostrar el resultado.",
+    "Si no existe una empresa con ese nombre, dile con naturalidad que no la encontraste y ofrécete a buscar por rubro en su lugar.",
+
+    // ─── PAGINACIÓN: VER MÁS RESULTADOS ───
+    "📄 PAGINACIÓN ('ver más resultados'):",
+    "Si el usuario dice 'ver más', 'más resultados', 'hay más', 'siguientes', etc., entiende que quiere el SIGUIENTE LOTE de la búsqueda anterior.",
+    "Las EMPRESAS RELEVANTES que recibas en ese caso son NUEVAS (no las ya mostradas). Muéstralas sin repetir las anteriores.",
+    "NO vuelvas a saludar ni a preguntar rubro/ubicación en la paginación: ya están en el historial.",
+    "Si el sistema te indica que esta es la última página, avísalo: '✅ Eso fue todo, no tengo más empresas para esta búsqueda.'",
+    "Si quedan más empresas después de la página actual, indica cuántas quedan: '🔎 ¡Quedan N empresas más! Dime si quieres ver más resultados.'",
+
+    // ─── REGLA ANTI-ECO DEL INPUT ───
+    "🚫 REGLA ANTI-ECO (CRÍTICA):",
+    "NUNCA repitas ni hagas eco del texto literal que escribió el usuario, incluyendo sus errores de tipeo.",
+    "No respondas con frases como 'empresas de <texto crudo del usuario>' copiando sus palabras exactas.",
+    "Interpreta la intención y responde de forma natural, reformulando con tus propias palabras.",
+    "Si el usuario escribió con errores (ej: 'nesecito'), entiende lo que quiso decir y responde correctamente, sin repetir el error ni señalarlo.",
   ].join("\n");
 };
 

@@ -47,6 +47,10 @@ const buildFallbackReply = (input: {
   matchingCount: number;
   memory: ConversationMemory;
   intent: SalesIntent;
+  isNameSearch?: boolean;
+  companyName?: string;
+  isPagination?: boolean;
+  pageOffset?: number;
 }): string => {
   const { relevantItems, matchingCount, memory, intent } = input;
 
@@ -60,6 +64,36 @@ const buildFallbackReply = (input: {
 
   const rubro = memory.lastRubro || "ese rubro";
   const ciudad = memory.lastUbicacion || "";
+
+  // ── Búsqueda por nombre exacto (fallback) ──
+  if (input.isNameSearch) {
+    const nombre = input.companyName || "";
+    if (relevantItems.length === 0) {
+      return `😕 No encontré ninguna empresa llamada *${nombre}* en el directorio${
+        ciudad ? ` para ${ciudad}` : ""
+      }.\n\n¿Quieres buscar por rubro en su lugar? 😊`;
+    }
+    const lista = relevantItems
+      .map((item, i) => `--- Empresa ${i + 1} ---\n${formatCatalogLine(item)}`)
+      .join("\n\n");
+    return `🎯 Encontré *${relevantItems.length}* empresa(s) con ese nombre:\n\n${lista}`;
+  }
+
+  // ── Paginación (fallback) ──
+  if (input.isPagination) {
+    if (relevantItems.length === 0) {
+      return "✅ Eso fue todo, no tengo más empresas para esa búsqueda.";
+    }
+    const start = (input.pageOffset ?? 0) + 1;
+    const lista = relevantItems
+      .map((item, i) => `--- Empresa ${start + i} ---\n${formatCatalogLine(item)}`)
+      .join("\n\n");
+    const remaining = matchingCount - (input.pageOffset ?? 0) - relevantItems.length;
+    const extra = remaining > 0
+      ? `\n\n🔎 ¡Quedan *${remaining} empresas más*! Dime si quieres ver más resultados.`
+      : "\n\n✅ Eso fue todo, no tengo más empresas para esta búsqueda.";
+    return `📄 Aquí tienes más opciones:\n\n${lista}${extra}`;
+  }
 
   if (relevantItems.length === 0) {
     const contexto = [rubro, ciudad].filter(Boolean).join(" en ");
@@ -152,6 +186,14 @@ export const generateReply = async (input: {
   relevantItems: CatalogItem[];
   totalCatalogItems: number;
   matchingCount: number;
+  /** True cuando la búsqueda fue por nombre exacto de empresa. */
+  isNameSearch?: boolean;
+  /** Nombre de empresa extraído del mensaje (solo cuando isNameSearch). */
+  companyName?: string;
+  /** True cuando es una página de resultados (paginación "ver más"). */
+  isPagination?: boolean;
+  /** Offset de la página actual (cuando isPagination). */
+  pageOffset?: number;
 }): Promise<string> => {
   if (!env.GEMINI_API_KEY) {
     // Aun sin IA configurada, saluda y despide correctamente
@@ -191,15 +233,56 @@ export const generateReply = async (input: {
       : isFirstMessage
       ? "Es el PRIMER mensaje de esta conversacion: preséntate brevemente como CoCo 🥥."
       : "NO es el primer mensaje: PROHIBIDO saludar con '¡Hola!' ni presentarte de nuevo. Responde directamente con emojis naturales.",
+    // ── REGLA ANTI-ECO ──
+    "🚫 REGLA ANTI-ECO (MUY IMPORTANTE):",
+    "NUNCA repitas ni hagas eco del texto literal que escribió el usuario.",
+    "No incluyas en tu respuesta frases como 'empresas de <texto crudo del usuario>' copiando palabra por palabra lo que él escribió, incluyendo sus errores de tipeo.",
+    "Interpreta la intención del usuario y responde de forma natural, reformulando con tus propias palabras.",
+    "Si el usuario escribió con errores (ej: 'nesecito'), corrige silenciosamente al entender y responde correctamente, sin señalar el error ni repetirlo.",
+    "Ejemplo INCORRECTO: 'Aquí tienes empresas de nesecito agencia despachante aduanas en La paz'",
+    "Ejemplo CORRECTO: '¡Claro! 🥥 Aquí tienes agencias despachantes de aduanas en La Paz:'",
   ].join(" ");
+
+  // ── Instrucciones específicas según el tipo de búsqueda ──
+  let searchContext = "";
+  if (input.isNameSearch) {
+    searchContext = [
+      "🔎 TIPO DE BÚSQUEDA: BÚSQUEDA POR NOMBRE EXACTO.",
+      `El usuario está buscando una empresa PUNTUAL por su nombre: "${input.companyName ?? ""}".`,
+      "Las EMPRESAS RELEVANTES de abajo ya fueron filtradas SOLO por nombre (no por rubro).",
+      "IMPORTANTE: muestra ÚNICAMENTE las empresas de la lista, que coinciden con el nombre pedido.",
+      "NO agregues otras empresas del mismo rubro que no estén en la lista.",
+      "Si la lista está vacía, dile con naturalidad que no encontraste una empresa con ese nombre y ofrécete a buscar por rubro.",
+    ].join(" ");
+  } else if (input.isPagination) {
+    const shown = (input.pageOffset ?? 0) + input.relevantItems.length;
+    const remaining = input.matchingCount - shown;
+    searchContext = [
+      "📄 TIPO DE BÚSQUEDA: PAGINACIÓN (el usuario pidió ver MÁS resultados).",
+      `Estás mostrando la página que empieza en el resultado #${(input.pageOffset ?? 0) + 1}.`,
+      `Total de empresas que coinciden con la búsqueda: ${input.matchingCount}.`,
+      `Resultados ya mostrados antes de esta página: ${input.pageOffset ?? 0}.`,
+      remaining > 0
+        ? `Quedan ${remaining} empresas más después de esta página. Al final, indica: '🔎 ¡Quedan ${remaining} empresas más! Dime si quieres ver más resultados.'`
+        : "Esta es la ÚLTIMA página. Al final indica que no hay más resultados para esta búsqueda.",
+      "NO repitas empresas que ya se mostraron en páginas anteriores (no están en la lista actual).",
+      "NO vuelvas a saludar ni a preguntar el rubro/ubicación: ya están en el historial.",
+    ].join(" ");
+  } else {
+    searchContext = [
+      "🔎 TIPO DE BÚSQUEDA: BÚSQUEDA POR RUBRO/CATEGORÍA.",
+      `Total de empresas que coinciden con la búsqueda: ${input.matchingCount}.`,
+      "Muestra hasta 5 empresas de la lista. Si hay más de 5, indica cuántas quedan con: '🔎 ¡Y hay N empresas más! Dime si quieres ver más resultados.'",
+    ].join(" ");
+  }
 
   const prompt = [
     `INTENCION: ${input.intent}`,
     `HORA: ${getDateTimeContext()}`,
     `MENSAJE DEL USUARIO: ${input.userMessage}`,
-    `EMPRESAS ENCONTRADAS PARA ESTA BUSQUEDA: ${input.matchingCount}`,
+    searchContext,
     `TOTAL EMPRESAS EN DIRECTORIO: ${input.totalCatalogItems}`,
-    "EMPRESAS RELEVANTES:",
+    "EMPRESAS RELEVANTES PARA ESTA RESPUESTA:",
     formatItems(input.relevantItems),
     "HISTORIAL DE CONVERSACION:",
     formatMemory(input.memory),
@@ -235,6 +318,10 @@ export const generateReply = async (input: {
         matchingCount: input.matchingCount,
         memory: input.memory,
         intent: input.intent,
+        isNameSearch: input.isNameSearch,
+        companyName: input.companyName,
+        isPagination: input.isPagination,
+        pageOffset: input.pageOffset,
       });
     }
   }
@@ -246,5 +333,9 @@ export const generateReply = async (input: {
     matchingCount: input.matchingCount,
     memory: input.memory,
     intent: input.intent,
+    isNameSearch: input.isNameSearch,
+    companyName: input.companyName,
+    isPagination: input.isPagination,
+    pageOffset: input.pageOffset,
   });
 };

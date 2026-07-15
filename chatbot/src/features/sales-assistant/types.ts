@@ -1,4 +1,10 @@
-export type SalesIntent = "query" | "comparison" | "greeting" | "farewell" | "more_results";
+export type SalesIntent =
+  | "query"
+  | "comparison"
+  | "greeting"
+  | "farewell"
+  | "more_results"
+  | "name_search";
 
 /**
  * Empresa del directorio. Cada campo corresponde a una columna del Google Sheets:
@@ -40,4 +46,18 @@ export interface ConversationMemory {
   lastUbicacion: string;
   /** Índice del último resultado mostrado para paginación con "más resultados" */
   lastResultOffset: number;
+  /**
+   * Total de coincidencias de la última búsqueda por rubro (sin paginar).
+   * Sirve para saber si hay más resultados por mostrar.
+   */
+  lastMatchingCount: number;
+  /**
+   * Términos de rubro usados en la última búsqueda paginada.
+   * Se usan para reconstruir la consulta cuando el usuario pide "ver más".
+   */
+  lastRubroTerms: string[];
+  /**
+   * Términos de ubicación usados en la última búsqueda paginada.
+   */
+  lastLocationTerms: string[];
 }

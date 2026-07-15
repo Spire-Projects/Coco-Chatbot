@@ -111,7 +111,8 @@ const makeStem = (term: string): string => {
 const buildGvizQuery = (
   rubroTerms: string[],
   locationTerms: string[],
-  limit: number
+  limit: number,
+  offset = 0
 ): string | null => {
   const conditions: string[] = [];
 
@@ -138,6 +139,39 @@ const buildGvizQuery = (
   }
 
   if (conditions.length === 0) return null;
+  const offsetClause = offset > 0 ? ` offset ${offset}` : "";
+  return `select * where ${conditions.join(" and ")} limit ${limit}${offsetClause}`;
+};
+
+/**
+ * Construye una query TQ para buscar por NOMBRE EXACTO de empresa.
+ * A diferencia de buildGvizQuery, aquí buscamos coincidencia del nombre
+ * completo en la columna C (Nombre), tolerante a tildes y mayúsculas.
+ * Devuelve null si no hay un nombre válido.
+ */
+const buildGvizNameQuery = (
+  name: string,
+  locationTerms: string[],
+  limit: number
+): string | null => {
+  const safeName = sanitizeTerm(normalizeText(name)).trim();
+  if (safeName.length < 3) return null;
+
+  // Coincidencia por nombre: usamos el stem del nombre completo para tolerar
+  // tildes y variaciones menores. Buscamos SOLO en la columna C (Nombre).
+  const nameStem = makeStem(safeName);
+  const conditions: string[] = [`lower(C) contains '${nameStem}'`];
+
+  if (locationTerms.length > 0) {
+    const locCols = ["A", "B"];
+    const parts = locationTerms.flatMap((t) => {
+      const stem = makeStem(t);
+      if (!stem) return [];
+      return locCols.map((col) => `lower(${col}) contains '${stem}'`);
+    });
+    if (parts.length > 0) conditions.push(`(${parts.join(" or ")})`);
+  }
+
   return `select * where ${conditions.join(" and ")} limit ${limit}`;
 };
 
@@ -226,14 +260,15 @@ const readItemsFromCsvFile = (filePath: string): CatalogItem[] => {
 export const searchCatalog = async (
   rubroTerms: string[],
   locationTerms: string[],
-  limit = 15
+  limit = 15,
+  offset = 0
 ): Promise<CatalogItem[]> => {
   if (env.CATALOG_FILE_PATH) {
     const items = readItemsFromCsvFile(env.CATALOG_FILE_PATH);
-    return filterCsvItems(items, rubroTerms, locationTerms, limit);
+    return filterCsvItems(items, rubroTerms, locationTerms, limit, offset);
   }
 
-  const tq = buildGvizQuery(rubroTerms, locationTerms, limit);
+  const tq = buildGvizQuery(rubroTerms, locationTerms, limit, offset);
   if (!tq) return [];
 
   const cached = queryCache.get(tq);
@@ -249,6 +284,123 @@ export const searchCatalog = async (
   }
   queryCache.set(tq, { results, cachedAt: Date.now() });
   return results;
+};
+
+/**
+ * Busca empresas por NOMBRE EXACTO (o casi exacto).
+ * A diferencia de searchCatalog, aquí solo se busca en la columna Nombre (C),
+ * por lo que no se mezclan resultados de otras empresas del mismo rubro.
+ *
+ * Devuelve las empresas cuyo nombre coincide con el término proporcionado,
+ * opcionalmente filtradas por ubicación.
+ */
+export const searchCatalogByName = async (
+  name: string,
+  locationTerms: string[],
+  limit = 10
+): Promise<CatalogItem[]> => {
+  if (env.CATALOG_FILE_PATH) {
+    const items = readItemsFromCsvFile(env.CATALOG_FILE_PATH);
+    return filterCsvItemsByName(items, name, locationTerms, limit);
+  }
+
+  const tq = buildGvizNameQuery(name, locationTerms, limit);
+  if (!tq) return [];
+
+  const cached = queryCache.get(tq);
+  if (cached && Date.now() - cached.cachedAt < QUERY_CACHE_TTL_MS) {
+    return cached.results;
+  }
+
+  const results = await fetchFromSheet(tq);
+
+  if (queryCache.size >= QUERY_CACHE_MAX_ENTRIES) {
+    const oldest = [...queryCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)[0];
+    queryCache.delete(oldest[0]);
+  }
+  queryCache.set(tq, { results, cachedAt: Date.now() });
+  return results;
+};
+
+/**
+ * Cuenta el total de empresas que coinciden con los términos de rubro y
+ * ubicación (sin aplicar limit/offset). Se usa para saber si hay más
+ * resultados por mostrar en la paginación ("ver más resultados").
+ */
+export const countCatalog = async (
+  rubroTerms: string[],
+  locationTerms: string[]
+): Promise<number> => {
+  if (env.CATALOG_FILE_PATH) {
+    const items = readItemsFromCsvFile(env.CATALOG_FILE_PATH);
+    // Reutiliza el filtro sin limit y cuenta
+    const all = filterCsvItems(items, rubroTerms, locationTerms, Number.MAX_SAFE_INTEGER, 0);
+    return all.length;
+  }
+
+  const where = buildGvizWhereClause(rubroTerms, locationTerms);
+  if (!where) return 0;
+
+  const tq = `select count(A) where ${where}`;
+  const cacheKey = `count:${tq}`;
+  const cached = queryCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < QUERY_CACHE_TTL_MS) {
+    return (cached.results[0] as unknown as { count: number }).count;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SHEETS_REQUEST_TIMEOUT_MS);
+    const url = makeSheetUrl(tq);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return 0;
+    const payload = await response.text();
+    const parsed = parseGvizResponse(payload);
+    const rows = parsed?.table?.rows ?? [];
+    const count = Number(rows[0]?.c?.[0]?.v ?? 0);
+    queryCache.set(cacheKey, {
+      results: [{ count } as unknown as CatalogItem],
+      cachedAt: Date.now()
+    });
+    return count;
+  } catch {
+    return 0;
+  }
+};
+
+/**
+ * Construye solo la cláusula WHERE (sin select/limit) reutilizando la
+ * misma lógica de buildGvizQuery. Útil para consultas count.
+ */
+const buildGvizWhereClause = (
+  rubroTerms: string[],
+  locationTerms: string[]
+): string | null => {
+  const conditions: string[] = [];
+
+  if (rubroTerms.length > 0) {
+    const actCols = ["C", "D", "J", "K", "L", "M"];
+    const parts = rubroTerms.flatMap((t) => {
+      const stem = makeStem(t);
+      if (!stem) return [];
+      return actCols.map((col) => `lower(${col}) contains '${stem}'`);
+    });
+    if (parts.length > 0) conditions.push(`(${parts.join(" or ")})`);
+  }
+
+  if (locationTerms.length > 0) {
+    const locCols = ["A", "B"];
+    const parts = locationTerms.flatMap((t) => {
+      const stem = makeStem(t);
+      if (!stem) return [];
+      return locCols.map((col) => `lower(${col}) contains '${stem}'`);
+    });
+    if (parts.length > 0) conditions.push(`(${parts.join(" or ")})`);
+  }
+
+  if (conditions.length === 0) return null;
+  return conditions.join(" and ");
 };
 
 /**
@@ -285,9 +437,12 @@ const filterCsvItems = (
   items: CatalogItem[],
   rubroTerms: string[],
   locationTerms: string[],
-  limit: number
+  limit: number,
+  offset = 0
 ): CatalogItem[] => {
-  if (rubroTerms.length === 0 && locationTerms.length === 0) return items.slice(0, limit);
+  if (rubroTerms.length === 0 && locationTerms.length === 0) {
+    return items.slice(offset, offset + limit);
+  }
   const rubroNorm = rubroTerms.map(normalizeText);
   const locNorm   = locationTerms.map(normalizeText);
   return items
@@ -298,6 +453,40 @@ const filterCsvItems = (
       const locOk   = locNorm.length === 0   || locNorm.some((t) => locBlob.includes(t));
       return rubroOk && locOk;
     })
-    .slice(0, limit);
+    .slice(offset, offset + limit);
+};
+
+/**
+ * Filtro por nombre exacto para modo CSV local.
+ * Solo compara contra el campo `nombre` (no actividades), para evitar
+ * mezclar empresas del mismo rubro que no son la buscada.
+ */
+const filterCsvItemsByName = (
+  items: CatalogItem[],
+  name: string,
+  locationTerms: string[],
+  limit: number
+): CatalogItem[] => {
+  const nameNorm = normalizeText(name);
+  if (nameNorm.length < 3) return [];
+  const locNorm = locationTerms.map(normalizeText);
+
+  // Primero intento: coincidencia exacta (normalizada) del nombre completo
+  let matches = items.filter((item) => normalizeText(item.nombre) === nameNorm);
+
+  // Si no hay exacta, buscamos por inclusión del nombre en el campo nombre
+  if (matches.length === 0) {
+    matches = items.filter((item) => normalizeText(item.nombre).includes(nameNorm));
+  }
+
+  // Filtro de ubicación si fue proporcionada
+  if (locNorm.length > 0) {
+    matches = matches.filter((item) => {
+      const locBlob = normalizeText(item.departamento + " " + item.municipio);
+      return locNorm.some((t) => locBlob.includes(t));
+    });
+  }
+
+  return matches.slice(0, limit);
 };
 

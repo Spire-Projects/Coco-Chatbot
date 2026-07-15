@@ -42,6 +42,9 @@ const getConversationMemoryByKey = (key: string): ConversationMemory => {
     lastRubro: "",
     lastUbicacion: "",
     lastResultOffset: 0,
+    lastMatchingCount: 0,
+    lastRubroTerms: [],
+    lastLocationTerms: [],
   };
 
   store.set(key, created);
